@@ -1,0 +1,10 @@
+[tool.poetry]
+name = "EpubToHtml"
+version = "1.0.0"
+description = "EPUB to HTML converter"
+authors = ["RLAlpha49 <75044176+RLAlpha49@users.noreply.github.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.12"
+ebooklib = "^0.18"
