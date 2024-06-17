@@ -4,7 +4,16 @@ version = "1.0.0"
 description = "EPUB to HTML converter"
 authors = ["RLAlpha49 <75044176+RLAlpha49@users.noreply.github.com>"]
 readme = "README.md"
+package-mode = false
 
 [tool.poetry.dependencies]
 python = "^3.12"
 ebooklib = "^0.18"
+ruff = "^0.4.9"
+mypy = "^1.10.0"
+
+[tool.ruff]
+line-length = 120
+
+[tool.mypy]
+ignore_missing_imports = true
