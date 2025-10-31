@@ -1,1 +1,8 @@
-.idea
+.mypy*
+.serena
+.venv
+images/
+output.html
+*_files/
+output_files/
+*.html
