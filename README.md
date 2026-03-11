@@ -12,31 +12,41 @@ A Python script that converts EPUB files to single HTML files with image handlin
 
 1. **Create a virtual environment** (recommended):
 
-   ```bash
-   # Create venv in the project folder
-   py -3 -m venv .venv
-   
-   # Activate (PowerShell)
-   .\.venv\Scripts\Activate.ps1
-   
-   # Activate (Command Prompt)
-   .\.venv\Scripts\activate.bat
-   
-   # Activate (bash/git-bash)
-   source .venv/bin/activate
-   ```
+    ```bash
+    # Create the venv in the project folder
+    py -3 -m venv .venv
+    ```
+
+    Activate using the command appropriate for your shell/OS:
+    - **Windows - PowerShell**
+
+        ```powershell
+        .\.venv\Scripts\Activate.ps1
+        ```
+
+    - **Windows - Command Prompt (cmd.exe)**
+
+        ```cmd
+        .\.venv\Scripts\activate.bat
+        ```
+
+    - **Unix‑style shells** (Linux, macOS, WSL, Git‑bash, etc.)
+
+        ```bash
+        source .venv/bin/activate
+        ```
 
 2. **Install dependencies**:
 
-   ```bash
-   python -m pip install -r requirements.txt
-   ```
+    ```bash
+    python -m pip install -r requirements.txt
+    ```
 
 3. **Optional: Install development tools** (for code quality checks):
 
-   ```bash
-   python -m pip install -r dev-requirements.txt
-   ```
+    ```bash
+    python -m pip install -r dev-requirements.txt
+    ```
 
 ## Usage
 
@@ -101,7 +111,7 @@ python main.py "book.epub" -o "output.html" -s extract
 
 Creates in current directory:
 
-- `output.html` - the HTML file  
+- `output.html` - the HTML file
 - `output_files/` - folder containing extracted images (default directory name)
 - Images are referenced with relative paths: `output_files/image_name.ext`
 
