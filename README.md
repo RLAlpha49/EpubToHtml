@@ -23,7 +23,7 @@ A Python script that converts EPUB files to single HTML files with image handlin
    .\.venv\Scripts\activate.bat
    
    # Activate (bash/git-bash)
-   source .venv/Scripts/activate
+   source .venv/bin/activate
    ```
 
 2. **Install dependencies**:
