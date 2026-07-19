@@ -12,15 +12,75 @@ import posixpath
 import re
 import sys
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, NoReturn
 from urllib.parse import quote, unquote, urlsplit
 
 import ebooklib
 from ebooklib import epub
-from tqdm import tqdm
+from rich.console import Console, Group
+from rich.logging import RichHandler
+from rich.panel import Panel
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    SpinnerColumn,
+    TaskProgressColumn,
+    TextColumn,
+    TimeElapsedColumn,
+)
+from rich.table import Table
+from rich.text import Text
 
-# Module logger (logging configuration moved to main() function)
 logger = logging.getLogger(__name__)
+console = Console(stderr=True)
+
+
+class CompactRichHandler(RichHandler):
+    """Render color-coded log levels without Rich's default fixed-width padding."""
+
+    def get_level_text(self, record: logging.LogRecord) -> Text:
+        """Return the styled level name at its natural width."""
+        return Text.styled(record.levelname, f"logging.level.{record.levelname.lower()}")
+
+
+class RichArgumentParser(argparse.ArgumentParser):
+    """Render command help and argument errors using Rich."""
+
+    def print_help(self, file: object | None = None) -> None:
+        del file
+        console.print(
+            Panel.fit(
+                Text("EPUB → HTML", style="bold bright_cyan"),
+                border_style="bright_cyan",
+            )
+        )
+        usage = Text.from_ansi(self.format_usage().strip())
+        console.print("[bold]Usage[/]")
+        console.print(usage)
+        if self.description:
+            console.print(f"\n[dim]{self.description}[/]")
+
+        options = Table(show_header=False, box=None, padding=(0, 2), expand=False)
+        options.add_column("Option", style="bold cyan", no_wrap=True)
+        options.add_column("Description")
+        for action in self._actions:
+            if action.help is argparse.SUPPRESS:
+                continue
+            option_names = ", ".join(action.option_strings)
+            if not option_names:
+                option_names = str(action.metavar or action.dest.upper())
+            elif action.metavar and action.nargs != 0:
+                option_names = f"{option_names} {action.metavar}"
+            options.add_row(option_names, action.help)
+
+        console.print("\n[bold]Options[/]")
+        console.print(options)
+
+    def error(self, message: str) -> NoReturn:
+        console.print(Panel(message, title="[bold red]Invalid command[/]", border_style="red"))
+        console.print(Text.from_ansi(self.format_usage().strip()), style="dim")
+        raise SystemExit(2)
 
 
 class ImageHandler:
@@ -257,6 +317,7 @@ class EpubConverter:
         remove_cover: bool = False,
         images_dir_name: str = "{stem}_files",
         chunked: bool = False,
+        ui_console: Console = console,
     ):
         """
         Initialize the EPUB converter.
@@ -286,6 +347,7 @@ class EpubConverter:
         self.remove_cover = remove_cover
         self.images_dir_name = images_dir_name
         self.chunked = chunked
+        self.ui_console = ui_console
         self._chardet_warning_logged = False
 
         # Create image handler
@@ -349,14 +411,37 @@ class EpubConverter:
             self._log_conversion_summary()
 
         except (FileNotFoundError, ValueError) as e:
-            logger.exception("Invalid input: %s", e)
+            logger.log(logging.ERROR, "Invalid input: %s", e)
             raise
         except (IOError, OSError) as e:
-            logger.exception("File operation failed: %s", e)
+            logger.log(logging.ERROR, "File operation failed: %s", e)
             raise
         except Exception as e:
-            logger.exception("Conversion failed: %s", e)
+            logger.log(logging.ERROR, "Conversion failed: %s", e)
             raise
+
+    def _track_items(
+        self, items: list[epub.EpubItem], description: str, unit: str
+    ) -> Iterable[epub.EpubItem]:
+        """Yield items with an optional Rich progress display."""
+        if not self.show_progress:
+            yield from items
+            return
+
+        with Progress(
+            SpinnerColumn(style="bright_cyan"),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(bar_width=None),
+            TaskProgressColumn(),
+            MofNCompleteColumn(),
+            TimeElapsedColumn(),
+            console=self.ui_console,
+            transient=True,
+        ) as progress:
+            task = progress.add_task(f"{description} ({unit})", total=len(items))
+            for item in items:
+                yield item
+                progress.advance(task)
 
     def _process_images(self, book: epub.EpubBook) -> None:
         """Extract and process all image and cover-image resources from the EPUB."""
@@ -365,12 +450,7 @@ class EpubConverter:
         image_items = [item for item in items if item.get_type() in image_item_types]
 
         if image_items:
-            for item in tqdm(
-                image_items,
-                desc="Processing images",
-                unit="img",
-                disable=not self.show_progress,
-            ):
+            for item in self._track_items(image_items, "Processing images", "img"):
                 try:
                     self.image_handler.process_image(item)
                     self.total_images_processed += 1
@@ -433,7 +513,7 @@ class EpubConverter:
 
         self._build_document_targets(doc_items)
         chunks: list[str] = []
-        for item in tqdm(doc_items, desc=description, unit="doc", disable=not self.show_progress):
+        for item in self._track_items(doc_items, description, "doc"):
             try:
                 content = self._decode_document_content(item)
                 self.total_docs_processed += 1
@@ -650,12 +730,7 @@ class EpubConverter:
             logger.info("No documents found in EPUB spine")
             return html_content
 
-        for item in tqdm(
-            doc_items,
-            desc="Extracting content",
-            unit="doc",
-            disable=not self.show_progress,
-        ):
+        for item in self._track_items(doc_items, "Extracting content", "doc"):
             try:
                 content = self._decode_document_content(item)
                 html_content += content + "\n"
@@ -691,12 +766,7 @@ class EpubConverter:
             logger.info("No documents found in EPUB")
             return html_content
 
-        for item in tqdm(
-            doc_items,
-            desc="Extracting content",
-            unit="doc",
-            disable=not self.show_progress,
-        ):
+        for item in self._track_items(doc_items, "Extracting content", "doc"):
             try:
                 content = self._decode_document_content(item)
                 html_content += content + "\n"
@@ -1017,28 +1087,32 @@ class EpubConverter:
         if self.image_handler.strategy == "extract":
             images_dir = str(self.image_handler.output_dir)
 
-        summary_parts = [
-            f"docs_processed={self.total_docs_processed}",
-            f"images_processed={self.total_images_processed}",
-            f"embedded={self.embedded_images_count}",
-            f"extracted={self.extracted_images_count}",
-            f"skipped_images={self.skipped_images_count}",
-            f"output={self.html_path}",
-        ]
-
+        summary = Table.grid(padding=(0, 1))
+        summary.add_column(style="bold cyan", justify="right")
+        summary.add_column()
+        summary.add_row("Documents", str(self.total_docs_processed))
+        summary.add_row("Images processed", str(self.total_images_processed))
+        summary.add_row("Embedded", str(self.embedded_images_count))
+        summary.add_row("Extracted", str(self.extracted_images_count))
+        summary.add_row("Skipped", str(self.skipped_images_count))
         if images_dir:
-            summary_parts.append(f"images_dir={images_dir}")
-
+            summary.add_row("Images directory", images_dir)
         if self.decode_fallbacks_count > 0:
-            summary_parts.append(f"encoding_fallbacks={self.decode_fallbacks_count}")
+            summary.add_row("Encoding fallbacks", str(self.decode_fallbacks_count))
             logger.info(
                 "Note: %d document(s) required encoding fallback detection. "
                 "For better accuracy, consider installing chardet: pip install chardet",
                 self.decode_fallbacks_count,
             )
-
-        summary = " | ".join(summary_parts)
-        logger.info("Conversion complete! Summary: %s", summary)
+        summary.add_row("HTML output", str(self.html_path))
+        self.ui_console.print(
+            Panel(
+                summary,
+                title="[bold green]Conversion complete[/]",
+                subtitle="Your HTML is ready to read.",
+                border_style="green",
+            )
+        )
 
     def _wrap_in_html_structure(self, content: str, title: str | None = None) -> str:
         """Wrap content in a complete HTML structure."""
@@ -1096,7 +1170,7 @@ class EpubConverter:
 
 def main() -> None:
     """Main entry point."""
-    parser = argparse.ArgumentParser(
+    parser = RichArgumentParser(
         description="Convert an EPUB file to HTML format with flexible image handling."
     )
 
@@ -1195,8 +1269,8 @@ def main() -> None:
     parser.add_argument(
         "--log-format",
         type=str,
-        default="%(asctime)s - %(levelname)s - %(message)s",
-        help="Set logging format (default: '%%(asctime)s - %%(levelname)s - %%(message)s')",
+        default="- %(message)s",
+        help="Set logging message format (default: '- %%(message)s')",
     )
 
     args = parser.parse_args()
@@ -1212,14 +1286,31 @@ def main() -> None:
         # Default to INFO
         log_level = logging.INFO
 
-    logging.basicConfig(level=log_level, format=args.log_format)
+    logging.basicConfig(
+        level=log_level,
+        format=args.log_format,
+        handlers=[
+            CompactRichHandler(
+                console=console,
+                show_time=False,
+                rich_tracebacks=args.verbose,
+                markup=True,
+            )
+        ],
+    )
 
     # Read CSS if provided
     css_content = None
     if args.css:
         css_path = Path(args.css)
         if not css_path.exists():
-            logger.error("CSS file not found: %s", css_path)
+            console.print(
+                Panel(
+                    f"CSS file not found: [bold]{css_path}[/]",
+                    title="[bold red]Conversion cannot start[/]",
+                    border_style="red",
+                )
+            )
             sys.exit(1)
         css_content = css_path.read_text(encoding="utf-8")
 
@@ -1228,7 +1319,13 @@ def main() -> None:
     # Validate EPUB file exists
     epub_path = Path(args.epub_path)
     if not epub_path.exists():
-        logger.error("EPUB file not found: %s", epub_path)
+        console.print(
+            Panel(
+                f"EPUB file not found: [bold]{epub_path}[/]",
+                title="[bold red]Conversion cannot start[/]",
+                border_style="red",
+            )
+        )
         sys.exit(1)
 
     # Resolve output path to absolute
@@ -1239,10 +1336,14 @@ def main() -> None:
     images_dir_name = args.images_dir_name
     final_images_dir_name = images_dir_name.format(stem=output_path.stem)
     if final_images_dir_name == output_path.name:
-        logger.error(
-            "Images directory name (%s) cannot equal HTML filename (%s); this would cause a collision.",
-            final_images_dir_name,
-            output_path.name,
+        console.print(
+            Panel(
+                "Images directory name "
+                f"([bold]{final_images_dir_name}[/]) cannot equal the HTML filename "
+                f"([bold]{output_path.name}[/]).",
+                title="[bold red]Path collision[/]",
+                border_style="red",
+            )
         )
         sys.exit(1)
 
@@ -1254,6 +1355,26 @@ def main() -> None:
         show_progress = True
     else:
         show_progress = sys.stderr.isatty()
+
+    plan = Table.grid(padding=(0, 1))
+    plan.add_column(style="bold cyan", justify="right")
+    plan.add_column()
+    plan.add_row("Source", str(epub_path))
+    plan.add_row("Destination", str(output_path))
+    plan.add_row("Images", args.strategy)
+    plan.add_row("Document shell", "enabled" if wrap_html else "fragment only")
+    plan.add_row("TOC", "remove" if args.remove_toc else "preserve")
+    plan.add_row("Cover", "remove" if args.remove_cover else "preserve")
+    plan.add_row("Processing", "chunked" if args.chunked else "standard")
+    console.print(
+        Group(
+            Panel.fit(
+                Text("EPUB → HTML", style="bold bright_cyan"),
+                border_style="bright_cyan",
+            ),
+            Panel(plan, border_style="blue"),
+        )
+    )
 
     try:
         converter = EpubConverter(
@@ -1276,8 +1397,17 @@ def main() -> None:
             final_dir_name = args.images_dir_name.format(stem=output_path.stem)
             images_dir = output_path.parent / final_dir_name
             logger.info("Images extracted to: %s", images_dir)
-    except (ValueError, OSError, IOError) as e:
-        logger.exception("Failed to convert EPUB: %s", e)
+    except Exception as error:  # pylint: disable=broad-exception-caught
+        console.print(
+            Panel(
+                str(error),
+                title="[bold red]Conversion failed[/]",
+                subtitle="Use --verbose for diagnostic details.",
+                border_style="red",
+            )
+        )
+        if args.verbose:
+            console.print_exception()
         sys.exit(1)
 
 
