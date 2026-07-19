@@ -10,6 +10,7 @@ import base64
 import logging
 import sys
 from pathlib import Path
+from typing import Iterable
 from urllib.parse import quote
 
 import ebooklib
@@ -54,7 +55,7 @@ class ImageHandler:
                 "html_root required when using 'extract' strategy for relative path computation"
             )
 
-    def process_image(self, item) -> tuple[str, str]:
+    def process_image(self, item: epub.EpubItem) -> tuple[str, str]:
         """
         Process an image item from the EPUB.
 
@@ -91,7 +92,7 @@ class ImageHandler:
         encoded_segments = [quote(segment, safe="") for segment in segments]
         return "/".join(encoded_segments)
 
-    def _embed_image(self, item) -> tuple[str, str]:
+    def _embed_image(self, item: epub.EpubItem) -> tuple[str, str]:
         """Convert image to base64 data URL.
 
         Raises:
@@ -154,12 +155,14 @@ class ImageHandler:
         logger.debug("Embedded image: %s (media type: %s)", image_name, media_type)
         return image_name, image_url
 
-    def _extract_image(self, item) -> tuple[str, str]:
+    def _extract_image(self, item: epub.EpubItem) -> tuple[str, str]:
         """Extract image to file and return file path.
 
         The relative path is computed relative to the HTML file's parent directory,
         using a consistent format of {html_stem}_files/{output_filename}.
         """
+        assert self.output_dir is not None, "output_dir must not be None when extracting images"
+
         image_name = item.get_name()
         image_data = item.get_content()
 
@@ -171,13 +174,13 @@ class ImageHandler:
         # Check for collision and prepend counter if needed
         output_filename = safe_basename + file_extension
         originally_intended_filename = output_filename  # Track original intent
-        output_path: Path = self.output_dir / output_filename  # type: ignore
+        output_path = self.output_dir / output_filename
 
         collision_count = 0
         while output_path.exists():
             collision_count += 1
             output_filename = f"{safe_basename}_{collision_count}{file_extension}"
-            output_path = self.output_dir / output_filename  # type: ignore
+            output_path = self.output_dir / output_filename
 
         self.image_counter += 1
 
@@ -210,7 +213,6 @@ class ImageHandler:
         # Compute relative path using hardcoded format: {html_stem}_files/{filename}
         # This decouples the path from absolute filesystem paths and ensures consistency
         assert self.html_root is not None, "html_root must not be None when extracting images"
-        assert self.output_dir is not None, "output_dir must not be None when extracting images"
 
         # Get the HTML stem (filename without extension) from the images directory name
         # html_root is the parent of the HTML file, and output_dir is html_root/{html_stem}_files
@@ -343,16 +345,16 @@ class EpubConverter:
             self._log_conversion_summary()
 
         except (FileNotFoundError, ValueError) as e:
-            logger.error("Invalid input: %s", e)
+            logger.exception("Invalid input: %s", e)
             raise
         except (IOError, OSError) as e:
-            logger.error("File operation failed: %s", e)
+            logger.exception("File operation failed: %s", e)
             raise
         except Exception as e:
-            logger.error("Conversion failed: %s", e, exc_info=True)
+            logger.exception("Conversion failed: %s", e)
             raise
 
-    def _process_images(self, book) -> None:
+    def _process_images(self, book: epub.EpubBook) -> None:
         """Extract and process all images from the EPUB."""
         # First pass: count images
         items = list(book.get_items())
@@ -388,7 +390,7 @@ class EpubConverter:
         else:
             logger.info("No images found in EPUB")
 
-    def _extract_content(self, book) -> str:
+    def _extract_content(self, book: epub.EpubBook) -> str:
         """Extract all document content from the EPUB in reading order."""
         html_content = self._extract_by_spine(book)
         if not html_content:
@@ -415,7 +417,7 @@ class EpubConverter:
 
         return html_content
 
-    def _extract_content_chunked(self, book) -> str:
+    def _extract_content_chunked(self, book: epub.EpubBook) -> str:
         """
         Extract document content from EPUB using chunked/incremental processing.
 
@@ -478,7 +480,7 @@ class EpubConverter:
 
         return html_content
 
-    def _decode_document_content(self, item) -> str:
+    def _decode_document_content(self, item: epub.EpubItem) -> str:
         """
         Decode document content with UTF-8 fallback to chardet or latin-1.
 
@@ -552,7 +554,7 @@ class EpubConverter:
                 logger.warning("Failed to extract document %s: %s", item.get_name(), e)
                 raise
 
-    def _extract_by_spine(self, book) -> str:
+    def _extract_by_spine(self, book: epub.EpubBook) -> str:
         """Extract documents using the EPUB spine (reading order)."""
         html_content = ""
 
@@ -582,9 +584,11 @@ class EpubConverter:
 
         return html_content
 
-    def _get_doc_items_from_spine(self, book, spine):
+    def _get_doc_items_from_spine(
+        self, book: epub.EpubBook, spine: Iterable[tuple[str, str] | str]
+    ) -> list[epub.EpubItem]:
         """Helper to collect document items from the spine."""
-        doc_items = []
+        doc_items: list[epub.EpubItem] = []
         for spine_item in spine:
             item_id = spine_item[0] if isinstance(spine_item, tuple) else spine_item
             try:
@@ -595,7 +599,7 @@ class EpubConverter:
                 pass
         return doc_items
 
-    def _extract_all_documents(self, book) -> str:
+    def _extract_all_documents(self, book: epub.EpubBook) -> str:
         """Fallback: extract all documents without spine order."""
         logger.warning("No spine found in EPUB, falling back to unordered extraction")
         html_content = ""
@@ -719,7 +723,7 @@ class EpubConverter:
         """
         # Split on commas not inside parentheses
         candidates = self._split_srcset_candidates(srcset_str)
-        result_parts = []
+        result_parts: list[str] = []
 
         for candidate in candidates:
             candidate = candidate.strip()
@@ -768,8 +772,8 @@ class EpubConverter:
         Returns:
             List of candidates split on top-level commas
         """
-        candidates = []
-        current = []
+        candidates: list[str] = []
+        current: list[str] = []
         paren_depth = 0
 
         for char in srcset_str:
@@ -1183,7 +1187,7 @@ def main() -> None:
             images_dir = output_path.parent / final_dir_name
             logger.info("Images extracted to: %s", images_dir)
     except (ValueError, OSError, IOError) as e:
-        logger.error("Failed to convert EPUB: %s", e)
+        logger.exception("Failed to convert EPUB: %s", e)
         sys.exit(1)
 
 
