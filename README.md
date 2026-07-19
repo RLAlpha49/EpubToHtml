@@ -1,6 +1,8 @@
 # EPUB to HTML Converter
 
-A Python script that converts EPUB files to single HTML files with image handling and optional HTML structuring.
+A Python command-line tool that converts an EPUB into one HTML document. It keeps
+spine order when available, rewrites EPUB-internal links to work after merging, and
+either embeds images for a portable single file or extracts them beside the HTML.
 
 ## Installation
 
@@ -78,11 +80,12 @@ optional arguments:
   --no-progress             Disable progress bars for long-running operations
   --allow-unknown-mime      Allow images with unknown MIME types; when enabled and media type cannot be determined, images will be skipped (use --strategy extract instead)
   --remove-toc              Remove table of contents elements (default: preserve TOC and rewrite internal links)
-    --remove-cover            Remove cover page elements (default: preserve cover)
+  --remove-cover            Remove cover page elements (default: preserve cover)
   --images-dir-name NAME    Directory name pattern for extracted images when using --strategy extract. Use {stem} as placeholder for HTML filename stem (default: {stem}_files)
   --force-progress          Force progress bars even when stderr is not a TTY; useful for CI logs (respects --no-progress if set)
+  --chunked                 Process documents incrementally to reduce peak memory for very large EPUBs
   --log-level LEVEL         Set logging level: DEBUG, INFO, WARNING, ERROR, CRITICAL (default: DEBUG if -v/--verbose, else INFO)
-  --log-format FORMAT       Set logging format (default: '%(asctime)s - %(levelname)s - %(message)s')
+  --log-format FORMAT       Set logging message format (default: '- %(message)s')
 ```
 
 ### Examples
@@ -213,6 +216,16 @@ python main.py "book.epub" --force-progress -o "output.html"
 ```
 
 By default, progress bars are disabled when running in non-interactive environments. Use `--force-progress` to enable them in CI logs.
+
+**Process a very large EPUB incrementally**:
+
+```bash
+python main.py "large-book.epub" --chunked -o "output.html"
+```
+
+Use this mode when memory is limited or the book has thousands of pages. It processes
+each source document independently before merging the results. For ordinary books,
+the default mode is usually simpler and just as fast.
 
 ## License
 

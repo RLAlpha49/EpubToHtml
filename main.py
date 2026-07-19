@@ -1,8 +1,9 @@
-"""
-EPUB to HTML Converter
+"""Convert an EPUB publication into one navigable HTML document.
 
-This module converts EPUB files to single HTML files with embedded or extracted images.
-Supports various output formats and image handling strategies.
+The converter preserves EPUB spine order where available, namespaces document IDs,
+and rewrites internal links so that navigation still works after separate XHTML
+files are merged. Images can be embedded for a self-contained result or extracted
+beside the HTML file when output size matters more than portability.
 """
 
 import argparse
@@ -84,7 +85,13 @@ class RichArgumentParser(argparse.ArgumentParser):
 
 
 class ImageHandler:
-    """Handles image extraction and embedding strategies."""
+    """Create stable HTML image references for one conversion.
+
+    Both mappings are retained because EPUBs commonly use document-relative paths,
+    while some producers use only a filename. Basename fallback is deliberately
+    limited to unique names so similarly named assets never silently point to the
+    wrong image.
+    """
 
     def __init__(
         self,
@@ -106,6 +113,8 @@ class ImageHandler:
         self.output_dir = output_dir
         self.html_root = html_root
         self.allow_unknown_mime = allow_unknown_mime
+        # Keep full paths for exact EPUB-relative resolution and basenames only as
+        # a guarded fallback for EPUBs that omit their asset directory.
         self.image_map: dict[str, str] = {}
         self.basename_map: dict[str, list[tuple[str, str]]] = {}
         self.image_counter = 0
@@ -118,8 +127,11 @@ class ImageHandler:
             )
 
     def process_image(self, item: epub.EpubItem) -> tuple[str, str]:
-        """
-        Process an image item from the EPUB.
+        """Convert one EPUB image according to the configured output strategy.
+
+        Returns the original EPUB resource name with its replacement HTML URL.
+        In extract mode this writes a file under ``output_dir``; in embed mode the
+        replacement is a data URL and no additional file is created.
 
         Args:
             item: The EPUB image item
@@ -148,8 +160,6 @@ class ImageHandler:
         Returns:
             URL-encoded path safe for HTML attributes (e.g., 'folder/image%20name.png')
         """
-        # Split on forward slash and encode each segment separately
-        # This preserves the path structure while encoding special characters
         segments = posix_path.split("/")
         encoded_segments = [quote(segment, safe="") for segment in segments]
         return "/".join(encoded_segments)
@@ -168,13 +178,15 @@ class ImageHandler:
         image_data = item.get_content()
         base64_data = base64.b64encode(image_data).decode("utf-8")
 
-        # Determine media type with fallback mapping for common image types
         media_type = item.media_type
         if not media_type:
+            # The manifest is authoritative when present; filenames are a useful
+            # fallback for EPUBs with incomplete or nonstandard manifests.
             media_type = mimetypes.guess_type(image_name)[0]
 
-        # Map common image extensions if media type still unknown
         if not media_type:
+            # ``mimetypes`` varies with the host OS, so provide the common web
+            # formats explicitly for predictable output across platforms.
             ext = Path(image_name).suffix.lower()
             extension_map = {
                 ".jpg": "image/jpeg",
@@ -186,7 +198,6 @@ class ImageHandler:
             }
             media_type = extension_map.get(ext)
 
-        # If still unknown, check user preference for handling unknown MIME types
         if not media_type:
             if not self.allow_unknown_mime:
                 error_msg = (
@@ -195,7 +206,6 @@ class ImageHandler:
                     f"or use '--strategy extract' to save images as files instead."
                 )
                 raise ValueError(error_msg)
-            # Raise RuntimeError to trigger extraction fallback
             error_msg = (
                 f"Unknown media type for image '{image_name}'. "
                 f"Embedding with unknown MIME types is not recommended. "
@@ -208,7 +218,8 @@ class ImageHandler:
 
         self.image_map[image_name] = image_url
 
-        # Also map by lowercase basename for lookup flexibility using multimap
+        # Multiple source images can share a basename; retain all candidates so
+        # lookup can reject an ambiguous reference instead of guessing.
         basename = Path(image_name).name.lower()
         if basename not in self.basename_map:
             self.basename_map[basename] = []
@@ -218,26 +229,27 @@ class ImageHandler:
         return image_name, image_url
 
     def _extract_image(self, item: epub.EpubItem) -> tuple[str, str]:
-        """Extract image to file and return file path.
+        """Extract an image and return a browser-safe, HTML-relative reference.
 
-        The relative path is computed relative to the HTML file's parent directory,
-        using a consistent format of {html_stem}_files/{output_filename}.
+        Filename collisions are resolved instead of overwriting existing files. This
+        matters when an EPUB itself contains repeated basenames or when converting
+        again into an existing output directory.
         """
         assert self.output_dir is not None, "output_dir must not be None when extracting images"
 
         image_name = item.get_name()
         image_data = item.get_content()
 
-        # Derive safe filename from basename, preserving extension
         base_filename = Path(image_name).name
         file_extension = Path(base_filename).suffix or ".jpg"
         safe_basename = Path(base_filename).stem or f"image_{self.image_counter + 1}"
 
-        # Check for collision and prepend counter if needed
         output_filename = safe_basename + file_extension
-        originally_intended_filename = output_filename  # Track original intent
+        originally_intended_filename = output_filename
         output_path = self.output_dir / output_filename
 
+        # EPUBs may reuse a basename in different internal folders, and a previous
+        # conversion may already occupy the destination. Never overwrite either.
         collision_count = 0
         while output_path.exists():
             collision_count += 1
@@ -246,10 +258,8 @@ class ImageHandler:
 
         self.image_counter += 1
 
-        # Ensure parent directories exist before writing
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Write image with error handling
         try:
             output_path.write_bytes(image_data)
             if collision_count > 0:
@@ -272,24 +282,19 @@ class ImageHandler:
             logger.warning("Failed to write image %s to %s: %s", image_name, output_path, e)
             raise
 
-        # Compute relative path using hardcoded format: {html_stem}_files/{filename}
-        # This decouples the path from absolute filesystem paths and ensures consistency
         assert self.html_root is not None, "html_root must not be None when extracting images"
 
-        # Get the HTML stem (filename without extension) from the images directory name
-        # html_root is the parent of the HTML file, and output_dir is html_root/{html_stem}_files
-        images_folder_name = self.output_dir.name  # Should be "{html_stem}_files"
+        # References are relative to the HTML file, not to the EPUB's original
+        # internal path, so extracted output remains movable as one directory.
+        images_folder_name = self.output_dir.name
 
-        # Create POSIX-style path: {html_stem}_files/{output_filename}
+        # HTML URLs always use forward slashes, even when conversion runs on Windows.
         posix_path = f"{images_folder_name}/{output_filename}"
 
-        # URL-encode the path for HTML src attributes to handle spaces and special characters
-        # This keeps POSIX separators while encoding each path segment
         encoded_html_path = self._encode_url_path(posix_path)
 
         self.image_map[image_name] = encoded_html_path
 
-        # Also map by lowercase basename for lookup flexibility using multimap
         basename = Path(image_name).name.lower()
         if basename not in self.basename_map:
             self.basename_map[basename] = []
@@ -302,7 +307,12 @@ class ImageHandler:
 
 
 class EpubConverter:
-    """Main EPUB to HTML converter."""
+    """Coordinate EPUB resource processing and merged-document generation.
+
+    A single converter instance owns all source-to-output mappings and statistics.
+    Keeping that state per conversion prevents links and images from one run from
+    affecting another run in the same Python process.
+    """
 
     def __init__(
         self,
@@ -350,40 +360,46 @@ class EpubConverter:
         self.ui_console = ui_console
         self._chardet_warning_logged = False
 
-        # Create image handler
         output_dir = None
         if image_strategy == "extract":
-            # Create images directory with configurable name
             dir_name = self.images_dir_name.format(stem=self.html_path.stem)
             output_dir = self.html_path.parent / dir_name
+            # Create this before processing resources so a write failure happens
+            # early, rather than after the EPUB has already been parsed.
             output_dir.mkdir(parents=True, exist_ok=True)
 
         self.image_handler = ImageHandler(
             image_strategy, output_dir, self.html_path.parent, allow_unknown_mime
         )
 
-        # Counters for tracking extraction decisions
         self.total_docs_processed = 0
         self.total_images_processed = 0
         self.embedded_images_count = 0
         self.extracted_images_count = 0
         self.skipped_images_count = 0
         self.decode_fallbacks_count = 0
+        # These maps are rebuilt for every conversion because generated anchors
+        # depend on the current book's document paths and IDs.
         self.document_anchors: dict[str, str] = {}
         self.document_id_maps: dict[str, dict[str, str]] = {}
 
     def convert(self) -> None:
-        """Convert EPUB to HTML."""
+        """Convert the configured EPUB and write its HTML output.
+
+        Reads metadata before processing resources so a wrapped document can use the
+        EPUB title. Exceptions are logged with an operation-specific message and
+        re-raised for the CLI to present a concise failure panel and non-zero exit.
+        """
         try:
             logger.info("Reading EPUB: %s", self.epub_path)
             book = epub.read_epub(str(self.epub_path))
 
-            # Extract EPUB title for use in HTML document
             epub_title = None
             try:
+                # ebooklib metadata differs between EPUB versions and producers:
+                # accept its common tuple form as well as a plain string.
                 title_list = book.get_metadata("DC", "title")
                 if title_list and len(title_list) > 0:
-                    # get_metadata returns list of tuples; extract value from first tuple
                     first_title = title_list[0]
                     if isinstance(first_title, tuple) and len(first_title) > 0:
                         epub_title = first_title[0]
@@ -392,22 +408,18 @@ class EpubConverter:
             except (AttributeError, IndexError, TypeError):
                 pass
 
-            # Process images first
             logger.info("Processing images...")
             self._process_images(book)
 
-            # Extract content
             logger.info("Extracting content...")
             if self.chunked:
                 html_content = self._extract_content_chunked(book)
             else:
                 html_content = self._extract_content(book)
 
-            # Write output
             logger.info("Writing output to: %s", self.html_path)
             self._write_html(html_content, title=epub_title)
 
-            # Log comprehensive summary
             self._log_conversion_summary()
 
         except (FileNotFoundError, ValueError) as e:
@@ -441,6 +453,8 @@ class EpubConverter:
             task = progress.add_task(f"{description} ({unit})", total=len(items))
             for item in items:
                 yield item
+                # Advance after yielding so the display only counts an item once
+                # its caller has finished processing it.
                 progress.advance(task)
 
     def _process_images(self, book: epub.EpubBook) -> None:
@@ -454,13 +468,11 @@ class EpubConverter:
                 try:
                     self.image_handler.process_image(item)
                     self.total_images_processed += 1
-                    # Track embedded vs extracted based on strategy
                     if self.image_handler.strategy == "embed":
                         self.embedded_images_count += 1
                     else:
                         self.extracted_images_count += 1
                 except RuntimeError as e:
-                    # Handle unknown MIME type when embedding - skip with clear message
                     logger.warning(
                         "Skipping image %s due to unknown MIME type. "
                         "To embed unknown types, use '--strategy extract' instead. Error: %s",
@@ -506,11 +518,19 @@ class EpubConverter:
         return [item for item in book.get_items() if item.get_type() == ebooklib.ITEM_DOCUMENT]
 
     def _assemble_documents(self, doc_items: list[epub.EpubItem], description: str) -> str:
-        """Merge EPUB documents after assigning collision-free HTML anchors."""
+        """Merge ordered EPUB documents after assigning collision-free anchors.
+
+        Target maps are built before content is emitted because a table of contents
+        can link forward to a chapter whose IDs have not yet been encountered. Each
+        source document is wrapped in a section to retain a stable destination when
+        a link targets the file itself rather than a fragment within it.
+        """
         if not doc_items:
             logger.info("No documents found in EPUB")
             return ""
 
+        # Build every destination before rewriting links; a TOC can refer to a
+        # later chapter that has not yet been appended to the output.
         self._build_document_targets(doc_items)
         chunks: list[str] = []
         for item in self._track_items(doc_items, description, "doc"):
@@ -523,6 +543,8 @@ class EpubConverter:
 
             if self.image_handler.image_map:
                 content = self._replace_image_references(item.get_name(), content)
+            # Preparing each chapter before joining prevents BeautifulSoup from
+            # reparsing an ever-growing full-book document.
             chunks.append(self._prepare_document_content(item, content))
 
         html_content = "\n".join(chunks)
@@ -543,6 +565,7 @@ class EpubConverter:
     @staticmethod
     def _normalize_document_path(path: str) -> str:
         """Normalize EPUB-internal paths without applying host OS path rules."""
+        # EPUB package paths are POSIX paths regardless of the host platform.
         normalized = posixpath.normpath(unquote(path).replace("\\", "/"))
         return normalized.removeprefix("./")
 
@@ -553,7 +576,12 @@ class EpubConverter:
         return component or "item"
 
     def _build_document_targets(self, doc_items: Iterable[epub.EpubItem]) -> None:
-        """Create page and fragment targets before rewriting any source links."""
+        """Precompute unique page and fragment targets for merged EPUB documents.
+
+        EPUB chapters often reuse IDs such as ``title`` or ``page1``. Prefixing IDs
+        with each chapter's generated anchor makes them valid single-document
+        targets without changing which source link resolves to which destination.
+        """
         self.document_anchors = {}
         self.document_id_maps = {}
         used_anchors: set[str] = set()
@@ -585,6 +613,8 @@ class EpubConverter:
                 original_id = str(tag["id"])
                 target_id = f"{document_anchor}--{self._anchor_component(original_id)}"
                 duplicate = 2
+                # A malformed chapter can repeat an ID. Preserve the first mapping
+                # for incoming links while still making every emitted ID unique.
                 while target_id in used_ids:
                     target_id = (
                         f"{document_anchor}--{self._anchor_component(original_id)}-{duplicate}"
@@ -615,6 +645,8 @@ class EpubConverter:
 
         body = soup.body
         if body:
+            # Discard the source document shell: the final output has one optional
+            # shell, while this section retains only the chapter's visible content.
             content = "".join(str(child) for child in body.contents)
         else:
             content = str(soup)
@@ -623,6 +655,8 @@ class EpubConverter:
     def _get_internal_link_target(self, source_path: str, href: str) -> str | None:
         """Convert an EPUB-local hyperlink to its generated single-document target."""
         parsed = urlsplit(href)
+        # Only rewrite local document/fragment links. Query-bearing or absolute
+        # URLs may rely on semantics that do not survive a single-file conversion.
         if parsed.scheme or parsed.netloc or parsed.query or parsed.path.startswith("/"):
             return None
 
@@ -639,14 +673,17 @@ class EpubConverter:
             target_id = self.document_id_maps.get(target_path, {}).get(unquote(parsed.fragment))
             if target_id:
                 return f"#{target_id}"
+        # A missing fragment can occur in imperfect EPUBs. Land at the chapter
+        # section rather than preserving a link that cannot work after merging.
         return f"#{document_anchor}"
 
     def _decode_document_content(self, item: epub.EpubItem) -> str:
-        """
-        Decode document content with UTF-8 fallback to chardet or latin-1.
+        """Decode EPUB markup, preferring fidelity while keeping conversion usable.
 
-        Attempts UTF-8 decoding first, then falls back to chardet detection
-        or latin-1 if available/configured.
+        EPUB content should be UTF-8, but real-world books occasionally violate that
+        requirement. The fallback path uses ``chardet`` when installed and otherwise
+        Latin-1 with replacement characters, favoring an inspectable HTML output
+        over abandoning an entire conversion due to one malformed document.
 
         Args:
             item: The EPUB document item
@@ -667,7 +704,8 @@ class EpubConverter:
                 item.get_name(),
             )
             try:
-                # Try encoding with chardet if available, otherwise fall back to latin-1
+                # Detection is optional: Latin-1 can decode every byte sequence,
+                # giving users inspectable output when chardet is unavailable.
                 try:
                     import chardet  # pylint: disable=import-outside-toplevel
 
@@ -675,7 +713,8 @@ class EpubConverter:
                     encoding = detected.get("encoding")
                     confidence = detected.get("confidence", 0)
 
-                    # Fall back to latin-1 if encoding is None or confidence is too low
+                    # Do not trust a weak guess; a deterministic fallback is easier
+                    # to diagnose than plausibly wrong text from a random encoding.
                     if not encoding or confidence < 0.5:
                         encoding = "latin-1"
                         logger.debug(
@@ -791,23 +830,22 @@ class EpubConverter:
         soup = BeautifulSoup(content, "html.parser")
         removed_count = 0
 
-        # Pattern 1: Find nav elements with epub:type="toc"
         for nav in soup.find_all("nav"):
             epub_type = nav.get("epub:type")
             if epub_type:
-                # Handle both string and list (BeautifulSoup may return list for attributes)
                 epub_type_str = str(epub_type) if epub_type else ""
-                # Check if 'toc' is present as a token in epub:type (handles "toc", "toc other", etc.)
+                # ``epub:type`` may contain several whitespace-separated semantic
+                # tokens; exact matching avoids removing values such as ``notoc``.
                 if any(token == "toc" for token in epub_type_str.split()):
                     nav.decompose()
                     removed_count += 1
 
-        # Pattern 2: Find elements with class containing 'toc' as a whole token
         for tag in soup.find_all(["nav", "div", "section", "article"]):
             class_attr = tag.get("class")
             if class_attr:
-                # BeautifulSoup parses class as a list
                 classes = class_attr if isinstance(class_attr, list) else str(class_attr).split()
+                # Match a class token, not a substring, so unrelated classes such
+                # as ``toc-entry`` are preserved.
                 if any(cls.lower() == "toc" for cls in classes):
                     tag.decompose()
                     removed_count += 1
@@ -832,23 +870,21 @@ class EpubConverter:
         soup = BeautifulSoup(content, "html.parser")
         removed_count = 0
 
-        # Pattern 1: Find elements with epub:type="cover"
         for tag in soup.find_all(["section", "div", "article"]):
             epub_type = tag.get("epub:type")
             if epub_type:
-                # Handle both string and list (BeautifulSoup may return list for attributes)
                 epub_type_str = str(epub_type) if epub_type else ""
-                # Check if 'cover' is present as a token in epub:type (handles "cover", "cover other", etc.)
+                # As with TOC removal, EPUB semantic values are token lists rather
+                # than one fixed string.
                 if any(token == "cover" for token in epub_type_str.split()):
                     tag.decompose()
                     removed_count += 1
 
-        # Pattern 2: Find elements with class containing 'cover' as a whole token
         for tag in soup.find_all(["div", "section", "article"]):
             class_attr = tag.get("class")
             if class_attr:
-                # BeautifulSoup parses class as a list
                 classes = class_attr if isinstance(class_attr, list) else str(class_attr).split()
+                # Exact tokens limit removal to deliberate cover markers.
                 if any(cls.lower() == "cover" for cls in classes):
                     tag.decompose()
                     removed_count += 1
@@ -873,7 +909,6 @@ class EpubConverter:
         Returns:
             Processed srcset with replaced URLs and preserved descriptors
         """
-        # Split on commas not inside parentheses
         candidates = self._split_srcset_candidates(srcset_str)
         result_parts: list[str] = []
 
@@ -882,9 +917,7 @@ class EpubConverter:
             if not candidate:
                 continue
 
-            # Split candidate into URL and descriptors
-            # URL is everything up to first whitespace, descriptors are the rest
-            tokens = candidate.split(None, 1)  # Split on first whitespace
+            tokens = candidate.split(None, 1)
             if not tokens:
                 result_parts.append(candidate)
                 continue
@@ -892,16 +925,15 @@ class EpubConverter:
             url = tokens[0].strip()
             descriptor = tokens[1] if len(tokens) > 1 else ""
 
-            # Attempt replacement
             replacement = self._get_image_replacement(source_path, url)
             if replacement:
-                # Replace URL, preserve descriptor
                 if descriptor:
                     result_parts.append(f"{replacement} {descriptor}")
                 else:
                     result_parts.append(replacement)
             else:
-                # Original URL preserved, log warning
+                # Preserve an unresolved candidate verbatim. A broken replacement
+                # is worse than retaining the source URL for manual recovery.
                 if descriptor:
                     result_parts.append(f"{url} {descriptor}")
                 else:
@@ -935,6 +967,8 @@ class EpubConverter:
             elif char == ")":
                 paren_depth -= 1
                 current.append(char)
+            # Commas inside functions (for example a data URL) are not candidate
+            # separators, so only split at the top level.
             elif char == "," and paren_depth == 0:
                 candidates.append("".join(current))
                 current = []
@@ -947,10 +981,12 @@ class EpubConverter:
         return candidates
 
     def _replace_image_references(self, source_path: str, content: str) -> str:
-        """Replace image references with embedded or extracted versions using BeautifulSoup.
+        """Replace source image URLs with the conversion's generated references.
 
-        Resolves document-relative image URLs against the EPUB path of the source
-        document before using an unambiguous basename as a fallback.
+        References are resolved relative to their XHTML document first, matching EPUB
+        semantics. An unambiguous basename is only a compatibility fallback for
+        malformed EPUBs; ambiguous assets retain their original URL to avoid a wrong
+        image being substituted.
         """
         if not self.image_handler.image_map:
             return content
@@ -959,7 +995,6 @@ class EpubConverter:
 
         soup = BeautifulSoup(content, "html.parser")
 
-        # Define image-bearing tags and their source attributes
         image_tag_specs = [
             ("img", ["src"]),
             ("image", ["href", "xlink:href"]),
@@ -968,7 +1003,6 @@ class EpubConverter:
 
         unresolved_count = 0
 
-        # Process each tag and look up images by basename
         for tag_name, attributes in image_tag_specs:
             tags = soup.find_all(tag_name)
             for tag in tags:
@@ -977,11 +1011,11 @@ class EpubConverter:
                     if not attr_value:
                         continue
 
-                    # Convert attribute value to string (handles BeautifulSoup's _AttributeValue types)
                     attr_value_str = str(attr_value)
 
-                    # For srcset attribute, process with spec-compliant parser
                     if attr == "srcset":
+                        # ``srcset`` contains several URL/descriptor pairs and
+                        # cannot be treated like a single ``src`` attribute.
                         processed_srcset = self._parse_and_replace_srcset(
                             source_path, attr_value_str
                         )
@@ -1027,21 +1061,25 @@ class EpubConverter:
             The replacement URL/path, or None if no unique mapping exists
         """
         parsed = urlsplit(url)
+        # Remote, root-relative, and empty URLs are outside the EPUB manifest and
+        # must remain untouched rather than being resolved against a chapter path.
         if parsed.scheme or parsed.netloc or not parsed.path or parsed.path.startswith("/"):
             return None
 
         normalized_source_path = self._normalize_document_path(source_path)
+        # EPUB references are relative to the XHTML file that contains them, not
+        # to the archive root or the output HTML file.
         resolved_path = self._normalize_document_path(
             posixpath.join(posixpath.dirname(normalized_source_path), parsed.path)
         )
 
-        # Step 1: Resolve the document-relative path against each EPUB image item.
         for image_name, image_url in self.image_handler.image_map.items():
             if self._normalize_document_path(image_name) == resolved_path:
                 return image_url
 
-        # Step 2: Retain compatibility with image references already expressed
-        # as their EPUB-internal paths.
+        # Retain compatibility with references already expressed as EPUB-internal
+        # paths. This is less precise than document-relative resolution, so it is
+        # intentionally attempted only after that canonical form.
         original_path = self._normalize_document_path(parsed.path)
         for image_name, image_url in self.image_handler.image_map.items():
             if self._normalize_document_path(image_name) == original_path:
@@ -1055,10 +1093,8 @@ class EpubConverter:
         if url_basename in self.image_handler.basename_map:
             candidates = self.image_handler.basename_map[url_basename]
             if len(candidates) == 1:
-                # Unique match found
                 return candidates[0][1]
             if len(candidates) > 1:
-                # Ambiguous: multiple images with same basename
                 logger.warning(
                     "Ambiguous image reference: '%s' matches multiple files with basename '%s' "
                     "from different folders (%s). Skipping replacement to avoid incorrect substitution.",
@@ -1068,7 +1104,6 @@ class EpubConverter:
                 )
                 return None
 
-        # No match found
         return None
 
     def _write_html(self, content: str, title: str | None = None) -> None:
@@ -1076,6 +1111,8 @@ class EpubConverter:
         self.html_path.parent.mkdir(parents=True, exist_ok=True)
 
         if self.wrap_html:
+            # Fragment output is intentional by default: callers may embed it in
+            # an existing page. Only synthesize a document shell when requested.
             content = self._wrap_in_html_structure(content, title=title)
 
         with open(self.html_path, "w", encoding="utf-8") as f:
@@ -1085,6 +1122,8 @@ class EpubConverter:
         """Log a comprehensive summary of extraction decisions and processing statistics."""
         images_dir = None
         if self.image_handler.strategy == "extract":
+            # This is reported only for extracted assets; embedded images have no
+            # separate location that would help the user find conversion output.
             images_dir = str(self.image_handler.output_dir)
 
         summary = Table.grid(padding=(0, 1))
@@ -1115,10 +1154,13 @@ class EpubConverter:
         )
 
     def _wrap_in_html_structure(self, content: str, title: str | None = None) -> str:
-        """Wrap content in a complete HTML structure."""
+        """Return a standalone HTML5 document around converted content.
+
+        Caller-provided CSS replaces the small readability-oriented default rather
+        than being appended to it, so custom styles fully control presentation.
+        """
         import textwrap  # pylint: disable=import-outside-toplevel
 
-        # Use provided title or fall back to default
         page_title = title if title else "EPUB Document"
 
         css_block = ""
@@ -1169,7 +1211,12 @@ class EpubConverter:
 
 
 def main() -> None:
-    """Main entry point."""
+    """Run the CLI, validate filesystem options, and report conversion outcomes.
+
+    This boundary owns user-facing rendering and process exit codes. Conversion
+    classes raise normal Python exceptions so they remain reusable by callers that
+    import this module instead of invoking it as a script.
+    """
     parser = RichArgumentParser(
         description="Convert an EPUB file to HTML format with flexible image handling."
     )
@@ -1275,15 +1322,12 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    # Configure logging dynamically based on verbosity and log-level
     if args.log_level:
-        # Explicit --log-level takes precedence
+        # An explicit level takes precedence over the convenient verbose shortcut.
         log_level = getattr(logging, args.log_level)
     elif args.verbose:
-        # -v/--verbose is a shorthand for DEBUG
         log_level = logging.DEBUG
     else:
-        # Default to INFO
         log_level = logging.INFO
 
     logging.basicConfig(
@@ -1299,7 +1343,6 @@ def main() -> None:
         ],
     )
 
-    # Read CSS if provided
     css_content = None
     if args.css:
         css_path = Path(args.css)
@@ -1314,9 +1357,10 @@ def main() -> None:
             sys.exit(1)
         css_content = css_path.read_text(encoding="utf-8")
 
+    # Custom CSS has nowhere valid to live in a fragment, so it implicitly opts
+    # into a complete HTML shell even when ``--wrap`` was not supplied.
     wrap_html = args.wrap or (args.css is not None)
 
-    # Validate EPUB file exists
     epub_path = Path(args.epub_path)
     if not epub_path.exists():
         console.print(
@@ -1328,11 +1372,13 @@ def main() -> None:
         )
         sys.exit(1)
 
-    # Resolve output path to absolute
+    # Resolve once so the plan, converter, and extracted-images location all use
+    # the same absolute base even when the current directory later changes.
     output_path = Path(args.output).resolve()
     logger.info("Resolved output path: %s", output_path)
 
-    # Validate --images-dir-name doesn't equal HTML filename to avoid collisions
+    # Validate the expanded name before creating the directory: otherwise extract
+    # mode could turn the requested HTML file path into a conflicting directory.
     images_dir_name = args.images_dir_name
     final_images_dir_name = images_dir_name.format(stem=output_path.stem)
     if final_images_dir_name == output_path.name:
@@ -1347,13 +1393,14 @@ def main() -> None:
         )
         sys.exit(1)
 
-    # Determine show_progress based on TTY and --force-progress
     show_progress = True
     if args.no_progress:
         show_progress = False
     elif args.force_progress:
         show_progress = True
     else:
+        # Rich progress redraws cleanly only on an interactive terminal; avoid
+        # polluting redirected output unless the caller explicitly forces it.
         show_progress = sys.stderr.isatty()
 
     plan = Table.grid(padding=(0, 1))
@@ -1392,12 +1439,13 @@ def main() -> None:
         )
         converter.convert()
 
-        # Log resolved paths after conversion
         if args.strategy == "extract":
             final_dir_name = args.images_dir_name.format(stem=output_path.stem)
             images_dir = output_path.parent / final_dir_name
             logger.info("Images extracted to: %s", images_dir)
     except Exception as error:  # pylint: disable=broad-exception-caught
+        # Conversion libraries can raise format-specific exceptions. Keep the CLI
+        # boundary friendly while ``--verbose`` still exposes the traceback.
         console.print(
             Panel(
                 str(error),

@@ -7,3 +7,4 @@ output.html
 *_files/
 output_files/
 *.html
+__pycache__/
