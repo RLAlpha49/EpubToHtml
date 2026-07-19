@@ -8,10 +8,12 @@ Supports various output formats and image handling strategies.
 import argparse
 import base64
 import logging
+import posixpath
+import re
 import sys
 from pathlib import Path
 from typing import Iterable
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlsplit
 
 import ebooklib
 from ebooklib import epub
@@ -251,7 +253,7 @@ class EpubConverter:
         css: str | None = None,
         show_progress: bool = True,
         allow_unknown_mime: bool = False,
-        keep_toc: bool = False,
+        remove_toc: bool = False,
         keep_cover: bool = False,
         images_dir_name: str = "{stem}_files",
         chunked: bool = False,
@@ -267,7 +269,7 @@ class EpubConverter:
             css: Optional CSS to include in the output
             show_progress: Whether to show progress bars for long operations
             allow_unknown_mime: Whether to allow embedding images with unknown MIME types
-            keep_toc: Whether to preserve table of contents elements
+            remove_toc: Whether to remove table of contents elements
             keep_cover: Whether to preserve cover page elements
             images_dir_name: Directory name pattern for extracted images (use {stem} for HTML stem)
             chunked: Whether to use chunked/incremental processing for large books
@@ -280,7 +282,7 @@ class EpubConverter:
         self.css = css
         self.show_progress = show_progress
         self.allow_unknown_mime = allow_unknown_mime
-        self.keep_toc = keep_toc
+        self.remove_toc = remove_toc
         self.keep_cover = keep_cover
         self.images_dir_name = images_dir_name
         self.chunked = chunked
@@ -305,6 +307,8 @@ class EpubConverter:
         self.extracted_images_count = 0
         self.skipped_images_count = 0
         self.decode_fallbacks_count = 0
+        self.document_anchors: dict[str, str] = {}
+        self.document_id_maps: dict[str, dict[str, str]] = {}
 
     def convert(self) -> None:
         """Convert EPUB to HTML."""
@@ -392,30 +396,8 @@ class EpubConverter:
 
     def _extract_content(self, book: epub.EpubBook) -> str:
         """Extract all document content from the EPUB in reading order."""
-        html_content = self._extract_by_spine(book)
-        if not html_content:
-            html_content = self._extract_all_documents(book)
-
-        # Remove cover pages (unless --keep-cover is set)
-        if not self.keep_cover:
-            logger.info("Removing cover pages...")
-            html_content = self._remove_cover(html_content)
-        else:
-            logger.info("Preserving cover pages (--keep-cover set)")
-
-        # Remove table of contents navigation elements (unless --keep-toc is set)
-        if not self.keep_toc:
-            logger.info("Removing table of contents...")
-            html_content = self._remove_toc(html_content)
-        else:
-            logger.info("Preserving table of contents (--keep-toc set)")
-
-        # Replace all image references at once after collecting all content
-        if self.image_handler.image_map:
-            logger.info("Replacing image references...")
-            html_content = self._replace_image_references(html_content)
-
-        return html_content
+        doc_items = self._get_document_items(book)
+        return self._assemble_documents(doc_items, "Extracting content")
 
     def _extract_content_chunked(self, book: epub.EpubBook) -> str:
         """
@@ -430,55 +412,154 @@ class EpubConverter:
         (<1000 pages), the difference is negligible. Chunked mode is recommended for
         books >5000 pages or when available memory is limited.
         """
-        html_content = ""
+        doc_items = self._get_document_items(book)
+        return self._assemble_documents(doc_items, "Extracting content (chunked)")
 
-        # Try spine-based extraction first
+    def _get_document_items(self, book: epub.EpubBook) -> list[epub.EpubItem]:
+        """Return EPUB document items in spine order, with an unordered fallback."""
         spine = book.spine if hasattr(book, "spine") else []
         doc_items = self._get_doc_items_from_spine(book, spine) if spine else []
+        if doc_items:
+            return doc_items
 
-        # Fall back to all documents if spine is empty
-        if not doc_items:
-            items = list(book.get_items())
-            doc_items = [item for item in items if item.get_type() == ebooklib.ITEM_DOCUMENT]
+        logger.warning("No spine found in EPUB, falling back to unordered extraction")
+        return [item for item in book.get_items() if item.get_type() == ebooklib.ITEM_DOCUMENT]
 
+    def _assemble_documents(self, doc_items: list[epub.EpubItem], description: str) -> str:
+        """Merge EPUB documents after assigning collision-free HTML anchors."""
         if not doc_items:
             logger.info("No documents found in EPUB")
-            return html_content
+            return ""
 
-        # Process documents sequentially with per-document image replacement
-        for item in tqdm(
-            doc_items,
-            desc="Extracting content (chunked)",
-            unit="doc",
-            disable=not self.show_progress,
-        ):
+        self._build_document_targets(doc_items)
+        chunks: list[str] = []
+        for item in tqdm(doc_items, desc=description, unit="doc", disable=not self.show_progress):
             try:
-                chunk_html = self._decode_document_content(item)
+                content = self._decode_document_content(item)
                 self.total_docs_processed += 1
             except (UnicodeDecodeError, AttributeError) as e:
                 logger.warning("Failed to extract document %s: %s", item.get_name(), e)
                 continue
 
-            # Replace image references within this chunk before concatenation
             if self.image_handler.image_map:
-                chunk_html = self._replace_image_references(chunk_html)
+                content = self._replace_image_references(content)
+            chunks.append(self._prepare_document_content(item, content))
 
-            html_content += chunk_html + "\n"
-
-        # Remove cover and TOC from the full concatenated content
+        html_content = "\n".join(chunks)
         if not self.keep_cover:
             logger.info("Removing cover pages...")
             html_content = self._remove_cover(html_content)
         else:
             logger.info("Preserving cover pages (--keep-cover set)")
 
-        if not self.keep_toc:
-            logger.info("Removing table of contents...")
+        if self.remove_toc:
+            logger.info("Removing table of contents (--remove-toc set)...")
             html_content = self._remove_toc(html_content)
         else:
-            logger.info("Preserving table of contents (--keep-toc set)")
+            logger.info("Preserving table of contents and rewriting internal links")
 
         return html_content
+
+    @staticmethod
+    def _normalize_document_path(path: str) -> str:
+        """Normalize EPUB-internal paths without applying host OS path rules."""
+        normalized = posixpath.normpath(unquote(path).replace("\\", "/"))
+        return normalized.removeprefix("./")
+
+    @staticmethod
+    def _anchor_component(value: str) -> str:
+        """Create a stable, URL-safe component for generated HTML IDs."""
+        component = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+        return component or "item"
+
+    def _build_document_targets(self, doc_items: Iterable[epub.EpubItem]) -> None:
+        """Create page and fragment targets before rewriting any source links."""
+        self.document_anchors = {}
+        self.document_id_maps = {}
+        used_anchors: set[str] = set()
+
+        for item in doc_items:
+            document_path = self._normalize_document_path(item.get_name())
+            anchor_base = f"epub-{self._anchor_component(document_path)}"
+            document_anchor = anchor_base
+            suffix = 2
+            while document_anchor in used_anchors:
+                document_anchor = f"{anchor_base}-{suffix}"
+                suffix += 1
+            used_anchors.add(document_anchor)
+            self.document_anchors[document_path] = document_anchor
+
+            try:
+                content = self._decode_document_content(item)
+            except (UnicodeDecodeError, AttributeError) as e:
+                logger.warning("Could not inspect anchors in %s: %s", item.get_name(), e)
+                self.document_id_maps[document_path] = {}
+                continue
+
+            from bs4 import BeautifulSoup  # pylint: disable=import-outside-toplevel
+
+            id_map: dict[str, str] = {}
+            used_ids: set[str] = set()
+            soup = BeautifulSoup(content, "html.parser")
+            for tag in soup.find_all(id=True):
+                original_id = str(tag["id"])
+                target_id = f"{document_anchor}--{self._anchor_component(original_id)}"
+                duplicate = 2
+                while target_id in used_ids:
+                    target_id = (
+                        f"{document_anchor}--{self._anchor_component(original_id)}-{duplicate}"
+                    )
+                    duplicate += 1
+                used_ids.add(target_id)
+                id_map.setdefault(original_id, target_id)
+            self.document_id_maps[document_path] = id_map
+
+    def _prepare_document_content(self, item: epub.EpubItem, content: str) -> str:
+        """Namespace IDs and rewrite internal links for one merged EPUB document."""
+        from bs4 import BeautifulSoup  # pylint: disable=import-outside-toplevel
+
+        document_path = self._normalize_document_path(item.get_name())
+        document_anchor = self.document_anchors[document_path]
+        id_map = self.document_id_maps[document_path]
+        soup = BeautifulSoup(content, "html.parser")
+
+        for tag in soup.find_all(id=True):
+            original_id = str(tag["id"])
+            if target_id := id_map.get(original_id):
+                tag["id"] = target_id
+
+        for link in soup.find_all("a", href=True):
+            replacement = self._get_internal_link_target(document_path, str(link["href"]))
+            if replacement:
+                link["href"] = replacement
+
+        body = soup.body
+        if body:
+            content = "".join(str(child) for child in body.contents)
+        else:
+            content = str(soup)
+        return f'<section id="{document_anchor}" data-epub-source="{document_path}">{content}</section>'
+
+    def _get_internal_link_target(self, source_path: str, href: str) -> str | None:
+        """Convert an EPUB-local hyperlink to its generated single-document target."""
+        parsed = urlsplit(href)
+        if parsed.scheme or parsed.netloc or parsed.query or parsed.path.startswith("/"):
+            return None
+
+        target_path = source_path
+        if parsed.path:
+            target_path = self._normalize_document_path(
+                posixpath.join(posixpath.dirname(source_path), parsed.path)
+            )
+        document_anchor = self.document_anchors.get(target_path)
+        if not document_anchor:
+            return None
+
+        if parsed.fragment:
+            target_id = self.document_id_maps.get(target_path, {}).get(unquote(parsed.fragment))
+            if target_id:
+                return f"#{target_id}"
+        return f"#{document_anchor}"
 
     def _decode_document_content(self, item: epub.EpubItem) -> str:
         """
@@ -1062,9 +1143,9 @@ def main() -> None:
     )
 
     parser.add_argument(
-        "--keep-toc",
+        "--remove-toc",
         action="store_true",
-        help="Preserve table of contents elements instead of removing them (default: remove TOC)",
+        help="Remove table of contents elements (default: preserve TOC and rewrite its links)",
     )
 
     parser.add_argument(
@@ -1106,7 +1187,7 @@ def main() -> None:
         "--log-format",
         type=str,
         default="%(asctime)s - %(levelname)s - %(message)s",
-        help="Set logging format (default: '%(asctime)s - %(levelname)s - %(message)s')",
+        help="Set logging format (default: '%%(asctime)s - %%(levelname)s - %%(message)s')",
     )
 
     args = parser.parse_args()
@@ -1174,7 +1255,7 @@ def main() -> None:
             css=css_content,
             show_progress=show_progress,
             allow_unknown_mime=args.allow_unknown_mime,
-            keep_toc=args.keep_toc,
+            remove_toc=args.remove_toc,
             keep_cover=args.keep_cover,
             images_dir_name=images_dir_name,
             chunked=args.chunked,

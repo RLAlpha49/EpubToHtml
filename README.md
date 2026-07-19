@@ -63,7 +63,7 @@ Output: `output.html` (resolved to absolute path in current directory)
 ### Command-Line Options
 
 ```text
-usage: main.py [-h] [-o OUTPUT] [-s {embed,extract}] [-w] [-c CSS] [-v] [--no-progress] [--allow-unknown-mime] [--keep-toc] [--keep-cover] [--images-dir-name NAME] [--force-progress] [--log-level LEVEL] [--log-format FORMAT] epub_path
+usage: main.py [-h] [-o OUTPUT] [-s {embed,extract}] [-w] [-c CSS] [-v] [--no-progress] [--allow-unknown-mime] [--remove-toc] [--keep-cover] [--images-dir-name NAME] [--force-progress] [--chunked] [--log-level LEVEL] [--log-format FORMAT] epub_path
 
 positional arguments:
   epub_path                 Path to the input EPUB file
@@ -77,7 +77,7 @@ optional arguments:
   -v, --verbose             Enable verbose logging (DEBUG level); shorthand for --log-level DEBUG
   --no-progress             Disable progress bars for long-running operations
   --allow-unknown-mime      Allow images with unknown MIME types; when enabled and media type cannot be determined, images will be skipped (use --strategy extract instead)
-  --keep-toc                Preserve table of contents elements instead of removing them (default: remove)
+  --remove-toc              Remove table of contents elements (default: preserve TOC and rewrite internal links)
   --keep-cover              Preserve cover page elements instead of removing them (default: remove)
   --images-dir-name NAME    Directory name pattern for extracted images when using --strategy extract. Use {stem} as placeholder for HTML filename stem (default: {stem}_files)
   --force-progress          Force progress bars even when stderr is not a TTY; useful for CI logs (respects --no-progress if set)
@@ -181,10 +181,13 @@ Inlines the CSS from `styles.css` into a `<style>` tag and automatically wraps t
 **Preserve table of contents and cover**:
 
 ```bash
-python main.py "book.epub" --keep-toc --keep-cover -o "output.html"
+python main.py "book.epub" --keep-cover -o "output.html"
 ```
 
-By default, TOC and cover elements are removed. Use these flags to preserve them.
+The TOC is preserved by default. Its EPUB-local links are rewritten to anchors in the
+single HTML file, including fragment links when the destination element exists. Cover
+elements are removed by default; use `--keep-cover` to preserve them. Use
+`--remove-toc` when the output should omit the TOC.
 
 **Enable debug logging with custom format**:
 
