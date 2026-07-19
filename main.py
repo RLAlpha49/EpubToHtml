@@ -254,7 +254,7 @@ class EpubConverter:
         show_progress: bool = True,
         allow_unknown_mime: bool = False,
         remove_toc: bool = False,
-        keep_cover: bool = False,
+        remove_cover: bool = False,
         images_dir_name: str = "{stem}_files",
         chunked: bool = False,
     ):
@@ -270,7 +270,7 @@ class EpubConverter:
             show_progress: Whether to show progress bars for long operations
             allow_unknown_mime: Whether to allow embedding images with unknown MIME types
             remove_toc: Whether to remove table of contents elements
-            keep_cover: Whether to preserve cover page elements
+            remove_cover: Whether to remove cover page elements
             images_dir_name: Directory name pattern for extracted images (use {stem} for HTML stem)
             chunked: Whether to use chunked/incremental processing for large books
                 (processes documents sequentially and replaces image refs per chunk
@@ -283,7 +283,7 @@ class EpubConverter:
         self.show_progress = show_progress
         self.allow_unknown_mime = allow_unknown_mime
         self.remove_toc = remove_toc
-        self.keep_cover = keep_cover
+        self.remove_cover = remove_cover
         self.images_dir_name = images_dir_name
         self.chunked = chunked
         self._chardet_warning_logged = False
@@ -359,10 +359,10 @@ class EpubConverter:
             raise
 
     def _process_images(self, book: epub.EpubBook) -> None:
-        """Extract and process all images from the EPUB."""
-        # First pass: count images
+        """Extract and process all image and cover-image resources from the EPUB."""
         items = list(book.get_items())
-        image_items = [item for item in items if item.get_type() == ebooklib.ITEM_IMAGE]
+        image_item_types = (ebooklib.ITEM_IMAGE, ebooklib.ITEM_COVER)
+        image_items = [item for item in items if item.get_type() in image_item_types]
 
         if image_items:
             for item in tqdm(
@@ -442,15 +442,15 @@ class EpubConverter:
                 continue
 
             if self.image_handler.image_map:
-                content = self._replace_image_references(content)
+                content = self._replace_image_references(item.get_name(), content)
             chunks.append(self._prepare_document_content(item, content))
 
         html_content = "\n".join(chunks)
-        if not self.keep_cover:
-            logger.info("Removing cover pages...")
+        if self.remove_cover:
+            logger.info("Removing cover pages (--remove-cover set)...")
             html_content = self._remove_cover(html_content)
         else:
-            logger.info("Preserving cover pages (--keep-cover set)")
+            logger.info("Preserving cover pages")
 
         if self.remove_toc:
             logger.info("Removing table of contents (--remove-toc set)...")
@@ -788,7 +788,7 @@ class EpubConverter:
 
         return str(soup)
 
-    def _parse_and_replace_srcset(self, srcset_str: str) -> str:
+    def _parse_and_replace_srcset(self, source_path: str, srcset_str: str) -> str:
         """
         Parse srcset attribute and replace URLs while preserving descriptors.
 
@@ -797,6 +797,7 @@ class EpubConverter:
         Only replaces the URL token, leaving descriptors untouched.
 
         Args:
+            source_path: EPUB path of the document containing the srcset attribute
             srcset_str: The srcset attribute value
 
         Returns:
@@ -822,7 +823,7 @@ class EpubConverter:
             descriptor = tokens[1] if len(tokens) > 1 else ""
 
             # Attempt replacement
-            replacement = self._get_image_replacement(url)
+            replacement = self._get_image_replacement(source_path, url)
             if replacement:
                 # Replace URL, preserve descriptor
                 if descriptor:
@@ -875,11 +876,11 @@ class EpubConverter:
 
         return candidates
 
-    def _replace_image_references(self, content: str) -> str:
+    def _replace_image_references(self, source_path: str, content: str) -> str:
         """Replace image references with embedded or extracted versions using BeautifulSoup.
 
-        Uses basename mapping when available for flexible reference matching.
-        Only replaces when a unique basename mapping exists; skips with warning otherwise.
+        Resolves document-relative image URLs against the EPUB path of the source
+        document before using an unambiguous basename as a fallback.
         """
         if not self.image_handler.image_map:
             return content
@@ -911,11 +912,12 @@ class EpubConverter:
 
                     # For srcset attribute, process with spec-compliant parser
                     if attr == "srcset":
-                        processed_srcset = self._parse_and_replace_srcset(attr_value_str)
+                        processed_srcset = self._parse_and_replace_srcset(
+                            source_path, attr_value_str
+                        )
                         tag[attr] = processed_srcset
                     else:
-                        # For src/href attributes, try to find and replace using basename mapping
-                        replacement = self._get_image_replacement(attr_value_str)
+                        replacement = self._get_image_replacement(source_path, attr_value_str)
                         if replacement:
                             tag[attr] = replacement
                         else:
@@ -936,43 +938,50 @@ class EpubConverter:
 
         return str(soup)
 
-    def _get_image_replacement(self, url: str) -> str | None:
+    def _get_image_replacement(self, source_path: str, url: str) -> str | None:
         """
-        Look up an image URL and return the replacement URL/path.
+        Look up an image URL relative to an EPUB document and return its replacement.
 
         Implementation order:
-        1. Exact match against image_map for the full original path
-        2. Relative path resolution (if document base path is known)
+        1. Exact match after resolving the URL against the source document path
+        2. Exact match against the original image item path
         3. Unambiguous basename lookup (only if single entry exists)
 
         Returns None for ambiguous basenames or no matches.
 
         Args:
+            source_path: EPUB path of the document containing the image reference
             url: The URL/path to look up
 
         Returns:
             The replacement URL/path, or None if no unique mapping exists
         """
-        # Extract base URL part (without query string or fragment)
-        base_url = url.split("?")[0].split("#")[0]
+        parsed = urlsplit(url)
+        if parsed.scheme or parsed.netloc or not parsed.path or parsed.path.startswith("/"):
+            return None
 
-        # Step 1: Exact match in image_map
-        if base_url in self.image_handler.image_map:
-            return self.image_handler.image_map[base_url]
+        normalized_source_path = self._normalize_document_path(source_path)
+        resolved_path = self._normalize_document_path(
+            posixpath.join(posixpath.dirname(normalized_source_path), parsed.path)
+        )
 
-        # Step 2: Try to resolve relative paths
-        # Extract basename from URL for matching
-        url_basename = Path(base_url).name.lower()
+        # Step 1: Resolve the document-relative path against each EPUB image item.
+        for image_name, image_url in self.image_handler.image_map.items():
+            if self._normalize_document_path(image_name) == resolved_path:
+                return image_url
+
+        # Step 2: Retain compatibility with image references already expressed
+        # as their EPUB-internal paths.
+        original_path = self._normalize_document_path(parsed.path)
+        for image_name, image_url in self.image_handler.image_map.items():
+            if self._normalize_document_path(image_name) == original_path:
+                return image_url
+
+        # Step 3: Use basename matching only when it cannot select the wrong image.
+        url_basename = posixpath.basename(resolved_path).lower()
         if not url_basename:
             return None
 
-        # Check if URL contains a filename that matches an original exactly
-        for original_name, image_url in self.image_handler.image_map.items():
-            original_basename = Path(original_name).name
-            if url_basename == original_basename.lower():
-                return image_url
-
-        # Step 3: Unambiguous basename lookup
         if url_basename in self.image_handler.basename_map:
             candidates = self.image_handler.basename_map[url_basename]
             if len(candidates) == 1:
@@ -1149,9 +1158,9 @@ def main() -> None:
     )
 
     parser.add_argument(
-        "--keep-cover",
+        "--remove-cover",
         action="store_true",
-        help="Preserve cover page elements instead of removing them (default: remove cover)",
+        help="Remove cover page elements (default: preserve cover)",
     )
 
     parser.add_argument(
@@ -1256,7 +1265,7 @@ def main() -> None:
             show_progress=show_progress,
             allow_unknown_mime=args.allow_unknown_mime,
             remove_toc=args.remove_toc,
-            keep_cover=args.keep_cover,
+            remove_cover=args.remove_cover,
             images_dir_name=images_dir_name,
             chunked=args.chunked,
         )

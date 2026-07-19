@@ -63,7 +63,7 @@ Output: `output.html` (resolved to absolute path in current directory)
 ### Command-Line Options
 
 ```text
-usage: main.py [-h] [-o OUTPUT] [-s {embed,extract}] [-w] [-c CSS] [-v] [--no-progress] [--allow-unknown-mime] [--remove-toc] [--keep-cover] [--images-dir-name NAME] [--force-progress] [--chunked] [--log-level LEVEL] [--log-format FORMAT] epub_path
+usage: main.py [-h] [-o OUTPUT] [-s {embed,extract}] [-w] [-c CSS] [-v] [--no-progress] [--allow-unknown-mime] [--remove-toc] [--remove-cover] [--images-dir-name NAME] [--force-progress] [--chunked] [--log-level LEVEL] [--log-format FORMAT] epub_path
 
 positional arguments:
   epub_path                 Path to the input EPUB file
@@ -78,7 +78,7 @@ optional arguments:
   --no-progress             Disable progress bars for long-running operations
   --allow-unknown-mime      Allow images with unknown MIME types; when enabled and media type cannot be determined, images will be skipped (use --strategy extract instead)
   --remove-toc              Remove table of contents elements (default: preserve TOC and rewrite internal links)
-  --keep-cover              Preserve cover page elements instead of removing them (default: remove)
+    --remove-cover            Remove cover page elements (default: preserve cover)
   --images-dir-name NAME    Directory name pattern for extracted images when using --strategy extract. Use {stem} as placeholder for HTML filename stem (default: {stem}_files)
   --force-progress          Force progress bars even when stderr is not a TTY; useful for CI logs (respects --no-progress if set)
   --log-level LEVEL         Set logging level: DEBUG, INFO, WARNING, ERROR, CRITICAL (default: DEBUG if -v/--verbose, else INFO)
@@ -162,6 +162,22 @@ Creates:
 - `/tmp/output.html` - the HTML file
 - `/tmp/output_files/` - folder containing extracted images
 
+**Remove the table of contents**:
+
+```bash
+python main.py "book.epub" -o "output.html" --remove-toc
+```
+
+Removes EPUB navigation and table-of-contents elements from the output. Internal links are preserved when the table of contents is not removed.
+
+**Remove the cover page**:
+
+```bash
+python main.py "book.epub" -o "output.html" --remove-cover
+```
+
+Removes cover-page elements identified by common EPUB cover markers.
+
 **Wrap in HTML structure with default styling**:
 
 ```bash
@@ -177,17 +193,6 @@ python main.py "book.epub" -c "styles.css" -o "output.html"
 ```
 
 Inlines the CSS from `styles.css` into a `<style>` tag and automatically wraps the content in a complete HTML structure. The `-c/--css` option always implies `--wrap`, so you don't need to specify both.
-
-**Preserve table of contents and cover**:
-
-```bash
-python main.py "book.epub" --keep-cover -o "output.html"
-```
-
-The TOC is preserved by default. Its EPUB-local links are rewritten to anchors in the
-single HTML file, including fragment links when the destination element exists. Cover
-elements are removed by default; use `--keep-cover` to preserve them. Use
-`--remove-toc` when the output should omit the TOC.
 
 **Enable debug logging with custom format**:
 
