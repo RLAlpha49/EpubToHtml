@@ -8,3 +8,4 @@ output.html
 output_files/
 *.html
 __pycache__/
+docs/
