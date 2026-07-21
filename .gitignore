@@ -9,3 +9,6 @@ output_files/
 *.html
 __pycache__/
 docs/
+dist/
+*.egg-info
+build/

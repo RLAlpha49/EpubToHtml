@@ -1,4 +1,4 @@
 ebooklib>=0.20
-rich>=13.0
-chardet>=5.0
-beautifulsoup4>=4.12
+rich>=15.0.0
+chardet>=7.4.3
+beautifulsoup4>=4.15

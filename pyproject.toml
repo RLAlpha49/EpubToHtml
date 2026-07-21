@@ -1,3 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "EpubToHtml"
+version = "1.0.0"
+description = "Convert EPUB publications into one navigable HTML document."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { file = "LICENSE" }
+dependencies = [
+  "beautifulsoup4>=4.15",
+  "chardet>=7.4.3",
+  "ebooklib>=0.20",
+  "rich>=15.0.0",
+]
+
+[project.scripts]
+epub-to-html = "cli:main"
+
+[tool.setuptools]
+py-modules = ["cli", "converter", "html_transform", "images", "model", "output"]
+
 [tool.ruff]
 line-length = 100
 
@@ -24,8 +48,13 @@ ignore = [
 [tool.mypy]
 exclude = ["typings"]
 ignore_missing_imports = true
+mypy_path = ["typings"]
 
 [tool.pylint]
 ignore = [".venv", "typings"]
 max-line-length = 120
 indent-string = '    '
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
