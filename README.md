@@ -4,6 +4,18 @@ A Python command-line tool that converts an EPUB into one HTML document. It keep
 spine order when available, rewrites EPUB-internal links to work after merging, and
 either embeds images for a portable single file or extracts them beside the HTML.
 
+## Trust and safety
+
+EPUB files are ZIP archives containing HTML, CSS, metadata, and images. By default,
+the converter preserves source markup for fidelity. Treat the resulting HTML as
+active content and use it only with EPUBs you understand and trust.
+
+If you do not trust an EPUB or its source, pass `--safe-mode`. Safe mode removes active
+elements, event handlers, inline CSS, SVG/XML, unsafe URL schemes, and external
+image/resource loads before content is emitted. Normal reading markup, headings,
+tables, footnotes, navigation links, and supported raster images are preserved
+where possible.
+
 ## Installation
 
 ### Prerequisites
@@ -65,27 +77,37 @@ Output: `output.html` (resolved to absolute path in current directory)
 ### Command-Line Options
 
 ```text
-usage: main.py [-h] [-o OUTPUT] [-s {embed,extract}] [-w] [-c CSS] [-v] [--no-progress] [--allow-unknown-mime] [--remove-toc] [--remove-cover] [--images-dir-name NAME] [--force-progress] [--chunked] [--log-level LEVEL] [--log-format FORMAT] epub_path
+usage: main.py [options] epub_path
 
 positional arguments:
-  epub_path                 Path to the input EPUB file
+  epub_path                   Path to the input EPUB file
 
 optional arguments:
-  -h, --help                Show this help message and exit
-  -o, --output PATH         Path to output HTML file. Relative paths are resolved from the current working directory and normalized to absolute paths. Default: output.html
-  -s, --strategy STRATEGY   Image handling strategy: 'embed' embeds images as base64 data URLs (compact HTML, all in one file); 'extract' saves images as separate files (default: embed)
-  -w, --wrap                Wrap content in complete HTML structure with default styling
-  -c, --css PATH            Path to a CSS file whose contents will be inlined into a <style> tag; implies --wrap
-  -v, --verbose             Enable verbose logging (DEBUG level); shorthand for --log-level DEBUG
-  --no-progress             Disable progress bars for long-running operations
-  --allow-unknown-mime      Allow images with unknown MIME types; when enabled and media type cannot be determined, images will be skipped (use --strategy extract instead)
-  --remove-toc              Remove table of contents elements (default: preserve TOC and rewrite internal links)
-  --remove-cover            Remove cover page elements (default: preserve cover)
-  --images-dir-name NAME    Directory name pattern for extracted images when using --strategy extract. Use {stem} as placeholder for HTML filename stem (default: {stem}_files)
-  --force-progress          Force progress bars even when stderr is not a TTY; useful for CI logs (respects --no-progress if set)
-  --chunked                 Process documents incrementally to reduce peak memory for very large EPUBs
-  --log-level LEVEL         Set logging level: DEBUG, INFO, WARNING, ERROR, CRITICAL (default: DEBUG if -v/--verbose, else INFO)
-  --log-format FORMAT       Set logging message format (default: '- %(message)s')
+  -h, --help                  Show this help message and exit
+  -o, --output PATH           Path to output HTML file. Relative paths are resolved from the current working directory and normalized to absolute paths. Default: output.html
+  -s, --strategy STRATEGY     Image handling strategy: 'embed' embeds images as base64 data URLs (compact HTML, all in one file); 'extract' saves images as separate files (default: embed)
+  -w, --wrap                  Wrap content in complete HTML structure with default styling
+  -c, --css PATH              Path to a CSS file whose contents will be inlined into a <style> tag; implies --wrap
+  -v, --verbose               Enable verbose logging (DEBUG level); shorthand for --log-level DEBUG
+  --no-progress               Disable progress bars for long-running operations
+  --allow-unknown-mime        Allow images with unknown MIME types; when enabled and media type cannot be determined, images will be skipped (use --strategy extract instead)
+  --remove-toc                Remove table of contents elements (default: preserve TOC and rewrite internal links)
+  --remove-cover              Remove cover page elements (default: preserve cover)
+  --images-dir-name NAME      Directory name pattern for extracted images when using --strategy extract. Use {stem} as placeholder for HTML filename stem (default: {stem}_files)
+  --force-progress            Force progress bars even when stderr is not a TTY; useful for CI logs (respects --no-progress if set)
+  --chunked                   Process documents incrementally to reduce peak memory for very large EPUBs
+    --safe-mode                 Sanitize active HTML/CSS and unsafe resource URLs; use for untrusted EPUBs
+  --force                     Replace existing output and extracted-image directories
+  --max-archive-entries N     Maximum ZIP members (default: 10000)
+  --max-compressed-bytes N    Maximum compressed archive bytes (default: 268435456)
+  --max-expanded-bytes N      Maximum expanded archive bytes (default: 1073741824)
+  --max-entry-bytes N         Maximum expanded bytes per archive member (default: 104857600)
+  --max-compression-ratio N   Maximum member compression ratio (default: 1000)
+  --max-documents N           Maximum EPUB document items (default: 5000)
+  --max-images N              Maximum EPUB image items (default: 10000)
+  --max-output-bytes N        Maximum generated HTML bytes (default: 1073741824)
+  --log-level LEVEL           Set logging level: DEBUG, INFO, WARNING, ERROR, CRITICAL (default: DEBUG if -v/--verbose, else INFO)
+  --log-format FORMAT         Set logging message format (default: '- %(message)s')
 ```
 
 ### Examples
@@ -226,6 +248,18 @@ python main.py "large-book.epub" --chunked -o "output.html"
 Use this mode when memory is limited or the book has thousands of pages. It processes
 each source document independently before merging the results. For ordinary books,
 the default mode is usually simpler and just as fast.
+
+### Safe mode for untrusted EPUBs
+
+Normal conversion preserves source markup and is intended for EPUBs you understand
+and trust. For an EPUB from an unknown source, explicitly enable safe mode:
+
+```bash
+python main.py "unknown-source.epub" --safe-mode --wrap -o "output.html"
+```
+
+Safe mode strips browser-active markup and unsafe resource URLs. It is a content
+filter, not a complete sandbox.
 
 ## License
 

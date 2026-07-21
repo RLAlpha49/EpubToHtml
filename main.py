@@ -8,15 +8,24 @@ beside the HTML file when output size matters more than portability.
 
 import argparse
 import base64
+import html as html_module
 import logging
+import os
 import posixpath
 import re
+import shutil
+import stat
 import sys
+import tempfile
+import zipfile
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, NoReturn
+from typing import NoReturn
 from urllib.parse import quote, unquote, urlsplit
 
 import ebooklib
+from bs4 import BeautifulSoup
 from ebooklib import epub
 from rich.console import Console, Group
 from rich.logging import RichHandler
@@ -35,6 +44,120 @@ from rich.text import Text
 
 logger = logging.getLogger(__name__)
 console = Console(stderr=True)
+
+
+class ArchiveLimitError(ValueError):
+    """Raised when an EPUB archive violates the configured safety policy."""
+
+
+class OutputError(OSError):
+    """Raised when staged output cannot be committed safely."""
+
+
+@dataclass(frozen=True)
+class ArchiveLimits:
+    """Resource limits applied before EbookLib opens an EPUB archive."""
+
+    max_entries: int = 10_000
+    max_compressed_bytes: int = 256 * 1024 * 1024
+    max_expanded_bytes: int = 1 * 1024 * 1024 * 1024
+    max_entry_bytes: int = 100 * 1024 * 1024
+    max_compression_ratio: float = 1_000.0
+    max_documents: int = 5_000
+    max_images: int = 10_000
+    max_output_bytes: int = 1 * 1024 * 1024 * 1024
+
+    def validate(self) -> None:
+        """Reject invalid policy values before any expensive conversion work."""
+        for name in (
+            "max_entries",
+            "max_compressed_bytes",
+            "max_expanded_bytes",
+            "max_entry_bytes",
+            "max_documents",
+            "max_images",
+            "max_output_bytes",
+        ):
+            if getattr(self, name) <= 0:
+                raise ValueError(f"{name} must be greater than zero")
+        if self.max_compression_ratio <= 0:
+            raise ValueError("max_compression_ratio must be greater than zero")
+
+
+def preflight_archive(epub_path: Path, limits: ArchiveLimits) -> None:
+    """Validate ZIP structure and resource costs before EbookLib parses an EPUB."""
+    limits.validate()
+    try:
+        with zipfile.ZipFile(epub_path) as archive:
+            entries = archive.infolist()
+            if len(entries) > limits.max_entries:
+                raise ArchiveLimitError(
+                    f"Archive contains {len(entries):,} entries; the limit is "
+                    f"{limits.max_entries:,}."
+                )
+
+            names: set[str] = set()
+            compressed_bytes = 0
+            expanded_bytes = 0
+            for info in entries:
+                raw_name = info.filename
+                normalized_name = raw_name.replace("\\", "/")
+                path_parts = normalized_name.split("/")
+                if (
+                    not normalized_name
+                    or normalized_name.startswith("/")
+                    or re.match(r"^[A-Za-z]:", normalized_name)
+                    or ".." in path_parts
+                    or "\x00" in normalized_name
+                ):
+                    raise ArchiveLimitError(f"Archive contains unsafe member name: {raw_name!r}.")
+
+                mode = (info.external_attr >> 16) & 0xFFFF
+                if stat.S_ISLNK(mode):
+                    raise ArchiveLimitError(
+                        f"Archive contains unsupported symbolic link member: {raw_name!r}."
+                    )
+
+                if raw_name in names:
+                    raise ArchiveLimitError(f"Archive contains duplicate member: {raw_name!r}.")
+                names.add(raw_name)
+
+                compressed_bytes += info.compress_size
+                expanded_bytes += info.file_size
+                if info.file_size > limits.max_entry_bytes:
+                    raise ArchiveLimitError(
+                        f"Archive member {raw_name!r} expands to {info.file_size:,} bytes; "
+                        f"the per-entry limit is {limits.max_entry_bytes:,}."
+                    )
+                if info.compress_size == 0:
+                    if info.file_size > 0:
+                        raise ArchiveLimitError(
+                            f"Archive member {raw_name!r} has an invalid compression ratio."
+                        )
+                elif info.file_size / info.compress_size > limits.max_compression_ratio:
+                    raise ArchiveLimitError(
+                        f"Archive member {raw_name!r} exceeds the compression-ratio limit "
+                        f"of {limits.max_compression_ratio:g}."
+                    )
+
+            if compressed_bytes > limits.max_compressed_bytes:
+                raise ArchiveLimitError(
+                    f"Archive compressed size is {compressed_bytes:,} bytes; the limit is "
+                    f"{limits.max_compressed_bytes:,}."
+                )
+            if expanded_bytes > limits.max_expanded_bytes:
+                raise ArchiveLimitError(
+                    f"Archive expanded size is {expanded_bytes:,} bytes; the limit is "
+                    f"{limits.max_expanded_bytes:,}."
+                )
+
+            required_members = {"mimetype", "META-INF/container.xml"}
+            missing_members = required_members - names
+            if missing_members:
+                missing = ", ".join(sorted(missing_members))
+                raise ValueError(f"EPUB archive is missing required member(s): {missing}.")
+    except zipfile.BadZipFile as error:
+        raise ValueError(f"Input is not a valid ZIP/EPUB archive: {error}") from error
 
 
 class CompactRichHandler(RichHandler):
@@ -73,7 +196,14 @@ class RichArgumentParser(argparse.ArgumentParser):
                 option_names = str(action.metavar or action.dest.upper())
             elif action.metavar and action.nargs != 0:
                 option_names = f"{option_names} {action.metavar}"
-            options.add_row(option_names, action.help)
+            help_text = Text(action.help or "")
+            if (
+                action.default is not None
+                and action.default is not argparse.SUPPRESS
+                and action.option_strings
+            ):
+                help_text.append(f" (default: {action.default})", style="bright_white")
+            options.add_row(option_names, help_text)
 
         console.print("\n[bold]Options[/]")
         console.print(options)
@@ -327,6 +457,9 @@ class EpubConverter:
         remove_cover: bool = False,
         images_dir_name: str = "{stem}_files",
         chunked: bool = False,
+        safe_html: bool = False,
+        force: bool = False,
+        archive_limits: ArchiveLimits | None = None,
         ui_console: Console = console,
     ):
         """
@@ -346,6 +479,9 @@ class EpubConverter:
             chunked: Whether to use chunked/incremental processing for large books
                 (processes documents sequentially and replaces image refs per chunk
                 before concatenation, useful for memory efficiency with large EPUBs)
+            safe_html: Remove active and unsafe markup before emitting HTML when enabled
+            force: Allow replacing existing output paths
+            archive_limits: Resource limits for archive and generated output
         """
         self.epub_path = Path(epub_path)
         self.html_path = Path(html_path)
@@ -357,16 +493,20 @@ class EpubConverter:
         self.remove_cover = remove_cover
         self.images_dir_name = images_dir_name
         self.chunked = chunked
+        self.safe_html = safe_html
+        self.force = force
+        self.archive_limits = archive_limits or ArchiveLimits()
         self.ui_console = ui_console
         self._chardet_warning_logged = False
+        self._final_html_path = self.html_path
+        self._staging_root: Path | None = None
+        self._staged_image_dir: Path | None = None
 
         output_dir = None
         if image_strategy == "extract":
+            self._validate_images_dir_name(images_dir_name)
             dir_name = self.images_dir_name.format(stem=self.html_path.stem)
             output_dir = self.html_path.parent / dir_name
-            # Create this before processing resources so a write failure happens
-            # early, rather than after the EPUB has already been parsed.
-            output_dir.mkdir(parents=True, exist_ok=True)
 
         self.image_handler = ImageHandler(
             image_strategy, output_dir, self.html_path.parent, allow_unknown_mime
@@ -383,6 +523,24 @@ class EpubConverter:
         self.document_anchors: dict[str, str] = {}
         self.document_id_maps: dict[str, dict[str, str]] = {}
 
+    @staticmethod
+    def _validate_images_dir_name(pattern: str) -> None:
+        """Ensure extracted assets remain a single directory below the output."""
+        if (
+            not pattern
+            or "{" in pattern.replace("{stem}", "")
+            or "}" in pattern.replace("{stem}", "")
+        ):
+            raise ValueError("images_dir_name may use only the {stem} placeholder")
+        expanded = pattern.format(stem="output")
+        if (
+            not expanded
+            or expanded in {".", ".."}
+            or Path(expanded).name != expanded
+            or Path(expanded).is_absolute()
+        ):
+            raise ValueError("images_dir_name must be a safe directory basename")
+
     def convert(self) -> None:
         """Convert the configured EPUB and write its HTML output.
 
@@ -390,9 +548,58 @@ class EpubConverter:
         EPUB title. Exceptions are logged with an operation-specific message and
         re-raised for the CLI to present a concise failure panel and non-zero exit.
         """
+        self.archive_limits.validate()
+        if not self.epub_path.is_file():
+            raise FileNotFoundError(
+                f"EPUB file not found or is not a regular file: {self.epub_path}"
+            )
+        if self.html_path.exists() and not self.force:
+            raise OutputError(
+                f"Output already exists: {self.html_path}. Use --force to replace it."
+            )
+        if self.image_handler.strategy == "extract":
+            image_dir_name = self.images_dir_name.format(stem=self.html_path.stem)
+            final_image_dir = self.html_path.parent / image_dir_name
+            if final_image_dir.exists() and not self.force:
+                raise OutputError(
+                    f"Extracted-image directory already exists: {final_image_dir}. "
+                    "Use --force to replace it."
+                )
+
+        preflight_archive(self.epub_path, self.archive_limits)
+        self.html_path.parent.mkdir(parents=True, exist_ok=True)
+        self._staging_root = Path(
+            tempfile.mkdtemp(prefix=f".{self.html_path.stem}-staging-", dir=self.html_path.parent)
+        )
+        staged_html_path = self._staging_root / self.html_path.name
+        self.html_path = staged_html_path
+        if self.image_handler.strategy == "extract":
+            dir_name = self.images_dir_name.format(stem=self._final_html_path.stem)
+            self._staged_image_dir = self._staging_root / dir_name
+            self.image_handler.output_dir = self._staged_image_dir
+
         try:
             logger.info("Reading EPUB: %s", self.epub_path)
             book = epub.read_epub(str(self.epub_path))
+
+            manifest_items = list(book.get_items())
+            document_count = sum(
+                item.get_type() == ebooklib.ITEM_DOCUMENT for item in manifest_items
+            )
+            image_count = sum(
+                item.get_type() in (ebooklib.ITEM_IMAGE, ebooklib.ITEM_COVER)
+                for item in manifest_items
+            )
+            if document_count > self.archive_limits.max_documents:
+                raise ArchiveLimitError(
+                    f"EPUB contains {document_count:,} documents; the limit is "
+                    f"{self.archive_limits.max_documents:,}."
+                )
+            if image_count > self.archive_limits.max_images:
+                raise ArchiveLimitError(
+                    f"EPUB contains {image_count:,} images; the limit is "
+                    f"{self.archive_limits.max_images:,}."
+                )
 
             epub_title = None
             try:
@@ -420,6 +627,15 @@ class EpubConverter:
             logger.info("Writing output to: %s", self.html_path)
             self._write_html(html_content, title=epub_title)
 
+            output_size = self._staged_output_size()
+            if output_size > self.archive_limits.max_output_bytes:
+                raise ArchiveLimitError(
+                    f"Generated output is {output_size:,} bytes; the output limit is "
+                    f"{self.archive_limits.max_output_bytes:,}."
+                )
+
+            self._commit_staged_output()
+
             self._log_conversion_summary()
 
         except (FileNotFoundError, ValueError) as e:
@@ -431,6 +647,69 @@ class EpubConverter:
         except Exception as e:
             logger.log(logging.ERROR, "Conversion failed: %s", e)
             raise
+        finally:
+            self._cleanup_staging()
+
+    def _commit_staged_output(self) -> None:
+        """Atomically replace the requested output and extracted asset directory."""
+        if self._staging_root is None:
+            raise OutputError("Output staging was not initialized")
+
+        final_html = self._final_html_path
+        final_images = None
+        if self._staged_image_dir is not None:
+            final_images = final_html.parent / self._staged_image_dir.name
+
+        backup_root = Path(
+            tempfile.mkdtemp(prefix=f".{final_html.stem}-backup-", dir=final_html.parent)
+        )
+        backed_up: list[tuple[Path, Path]] = []
+        committed: list[Path] = []
+        try:
+            for target in (final_html, final_images):
+                if target is None or not target.exists():
+                    continue
+                if not self.force:
+                    raise OutputError(
+                        f"Output already exists: {target}. Use --force to replace it."
+                    )
+                backup = backup_root / target.name
+                os.replace(target, backup)
+                backed_up.append((target, backup))
+
+            os.replace(self.html_path, final_html)
+            committed.append(final_html)
+            if self._staged_image_dir is not None and self._staged_image_dir.exists():
+                if final_images is None:
+                    raise OutputError("Image staging was configured without a final image path")
+                os.replace(self._staged_image_dir, final_images)
+                committed.append(final_images)
+            self.html_path = final_html
+            self.image_handler.output_dir = final_images
+        except OSError as error:
+            for target in reversed(committed):
+                if target.is_dir():
+                    shutil.rmtree(target, ignore_errors=True)
+                else:
+                    target.unlink(missing_ok=True)
+            for target, backup in reversed(backed_up):
+                if backup.exists():
+                    os.replace(backup, target)
+            raise OutputError(f"Could not commit converted output: {error}") from error
+        finally:
+            shutil.rmtree(backup_root, ignore_errors=True)
+
+    def _staged_output_size(self) -> int:
+        """Return the total byte size of all files waiting to be committed."""
+        if self._staging_root is None:
+            raise OutputError("Output staging was not initialized")
+        return sum(path.stat().st_size for path in self._staging_root.rglob("*") if path.is_file())
+
+    def _cleanup_staging(self) -> None:
+        """Remove private staging files after success or failure."""
+        if self._staging_root is not None:
+            shutil.rmtree(self._staging_root, ignore_errors=True)
+        self.html_path = self._final_html_path
 
     def _track_items(
         self, items: list[epub.EpubItem], description: str, unit: str
@@ -604,8 +883,6 @@ class EpubConverter:
                 self.document_id_maps[document_path] = {}
                 continue
 
-            from bs4 import BeautifulSoup  # pylint: disable=import-outside-toplevel
-
             id_map: dict[str, str] = {}
             used_ids: set[str] = set()
             soup = BeautifulSoup(content, "html.parser")
@@ -626,8 +903,6 @@ class EpubConverter:
 
     def _prepare_document_content(self, item: epub.EpubItem, content: str) -> str:
         """Namespace IDs and rewrite internal links for one merged EPUB document."""
-        from bs4 import BeautifulSoup  # pylint: disable=import-outside-toplevel
-
         document_path = self._normalize_document_path(item.get_name())
         document_anchor = self.document_anchors[document_path]
         id_map = self.document_id_maps[document_path]
@@ -643,14 +918,90 @@ class EpubConverter:
             if replacement:
                 link["href"] = replacement
 
+        if self.safe_html:
+            self._sanitize_document(soup)
+
         body = soup.body
-        if body:
-            # Discard the source document shell: the final output has one optional
-            # shell, while this section retains only the chapter's visible content.
-            content = "".join(str(child) for child in body.contents)
-        else:
-            content = str(soup)
-        return f'<section id="{document_anchor}" data-epub-source="{document_path}">{content}</section>'
+        # Discard the source document shell when present: the final output has one
+        # optional shell, while this section retains only visible chapter content.
+        content = "".join(str(child) for child in body.contents) if body else str(soup)
+        escaped_source = html_module.escape(document_path, quote=True)
+        return f'<section id="{document_anchor}" data-epub-source="{escaped_source}">{content}</section>'
+
+    def _sanitize_document(self, soup: BeautifulSoup) -> None:
+        """Remove browser-active EPUB markup and unsafe resource references."""
+        # BeautifulSoup's type is intentionally kept local because EbookLib's
+        # optional parser dependency is not part of the public API surface.
+        dangerous_tags = {
+            "base",
+            "button",
+            "canvas",
+            "embed",
+            "form",
+            "iframe",
+            "input",
+            "link",
+            "math",
+            "meta",
+            "object",
+            "script",
+            "style",
+            "svg",
+            "template",
+            "video",
+            "audio",
+        }
+        for tag in soup.find_all(dangerous_tags):
+            tag.decompose()
+
+        safe_url_attributes = {"href", "src", "poster", "xlink:href"}
+        for tag in soup.find_all(True):
+            for attribute in tuple(tag.attrs):
+                attribute_name = str(attribute).lower()
+                if attribute_name.startswith("on") or attribute_name == "style":
+                    del tag.attrs[attribute]
+                    continue
+                if attribute_name not in safe_url_attributes:
+                    continue
+                value = tag.attrs[attribute]
+                values: Sequence[object] = value if isinstance(value, list) else [value]
+                if any(
+                    not self._is_safe_url(tag.name, attribute_name, str(candidate))
+                    for candidate in values
+                ):
+                    del tag.attrs[attribute]
+
+            if tag.name in {"img", "source"}:
+                for attribute in ("src",):
+                    src_value = tag.get(attribute)
+                    if src_value and not self._is_safe_url(tag.name, attribute, str(src_value)):
+                        del tag.attrs[attribute]
+                srcset = tag.get("srcset")
+                if srcset:
+                    candidates = self._split_srcset_candidates(str(srcset))
+                    if any(
+                        not self._is_safe_url(
+                            tag.name, "srcset", candidate.strip().split(None, 1)[0]
+                        )
+                        for candidate in candidates
+                        if candidate.strip()
+                    ):
+                        del tag.attrs["srcset"]
+
+    @staticmethod
+    def _is_safe_url(tag_name: str, attribute_name: str, value: str) -> bool:
+        """Allow only inert local URLs, safe links, and generated raster data URLs."""
+        parsed = urlsplit(value.strip())
+        scheme = parsed.scheme.lower()
+        if parsed.netloc:
+            return False
+        if tag_name == "a" and attribute_name == "href":
+            return scheme in {"", "http", "https", "mailto", "tel"}
+        if scheme == "":
+            return True
+        return scheme == "data" and parsed.path.lower().startswith(
+            ("image/png", "image/jpeg", "image/gif", "image/webp")
+        )
 
     def _get_internal_link_target(self, source_path: str, href: str) -> str | None:
         """Convert an EPUB-local hyperlink to its generated single-document target."""
@@ -825,8 +1176,6 @@ class EpubConverter:
 
         Returns consistent HTML output with nodes removed.
         """
-        from bs4 import BeautifulSoup  # pylint: disable=import-outside-toplevel
-
         soup = BeautifulSoup(content, "html.parser")
         removed_count = 0
 
@@ -865,8 +1214,6 @@ class EpubConverter:
 
         Returns consistent HTML output with nodes removed.
         """
-        from bs4 import BeautifulSoup  # pylint: disable=import-outside-toplevel
-
         soup = BeautifulSoup(content, "html.parser")
         removed_count = 0
 
@@ -990,8 +1337,6 @@ class EpubConverter:
         """
         if not self.image_handler.image_map:
             return content
-
-        from bs4 import BeautifulSoup  # pylint: disable=import-outside-toplevel
 
         soup = BeautifulSoup(content, "html.parser")
 
@@ -1199,7 +1544,7 @@ class EpubConverter:
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{page_title}</title>
+    <title>{html_module.escape(page_title, quote=True)}</title>
     {css_block}
 </head>
 <body>
@@ -1228,7 +1573,7 @@ def main() -> None:
         "--output",
         type=str,
         default="output.html",
-        help="Path to output HTML file (relative paths are resolved from the current working directory; default: output.html)",
+        help="Path to output HTML file (relative paths are resolved from the current working directory)",
     )
 
     parser.add_argument(
@@ -1236,7 +1581,7 @@ def main() -> None:
         "--strategy",
         choices=["embed", "extract"],
         default="embed",
-        help="Image handling: 'embed' for base64 or 'extract' for separate files (default: embed)",
+        help="Image handling: 'embed' for base64 or 'extract' for separate files",
     )
 
     parser.add_argument(
@@ -1275,20 +1620,20 @@ def main() -> None:
     parser.add_argument(
         "--remove-toc",
         action="store_true",
-        help="Remove table of contents elements (default: preserve TOC and rewrite its links)",
+        help="Remove table of contents elements; otherwise preserve the TOC and rewrite its links",
     )
 
     parser.add_argument(
         "--remove-cover",
         action="store_true",
-        help="Remove cover page elements (default: preserve cover)",
+        help="Remove cover page elements; otherwise preserve the cover",
     )
 
     parser.add_argument(
         "--images-dir-name",
         type=str,
         default="{stem}_files",
-        help="Directory name pattern for extracted images when using --strategy extract. Use {stem} as placeholder for HTML filename stem (default: {stem}_files)",
+        help="Directory name pattern for extracted images when using --strategy extract. Use {stem} as placeholder for the HTML filename stem",
     )
 
     parser.add_argument(
@@ -1306,18 +1651,79 @@ def main() -> None:
     )
 
     parser.add_argument(
+        "--safe-mode",
+        action="store_true",
+        help="Sanitize active HTML/CSS and unsafe resource URLs before emitting output (use for untrusted EPUBs)",
+    )
+
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Replace an existing HTML output and extracted-image directory",
+    )
+
+    parser.add_argument(
+        "--max-archive-entries",
+        type=int,
+        default=ArchiveLimits.max_entries,
+        help="Maximum number of files allowed in the EPUB archive",
+    )
+    parser.add_argument(
+        "--max-compressed-bytes",
+        type=int,
+        default=ArchiveLimits.max_compressed_bytes,
+        help="Maximum total compressed size of the EPUB archive in bytes",
+    )
+    parser.add_argument(
+        "--max-expanded-bytes",
+        type=int,
+        default=ArchiveLimits.max_expanded_bytes,
+        help="Maximum total expanded size of the EPUB archive in bytes",
+    )
+    parser.add_argument(
+        "--max-entry-bytes",
+        type=int,
+        default=ArchiveLimits.max_entry_bytes,
+        help="Maximum expanded size of one EPUB archive member in bytes",
+    )
+    parser.add_argument(
+        "--max-compression-ratio",
+        type=float,
+        default=ArchiveLimits.max_compression_ratio,
+        help="Maximum allowed expanded-to-compressed size ratio for one archive member",
+    )
+    parser.add_argument(
+        "--max-documents",
+        type=int,
+        default=ArchiveLimits.max_documents,
+        help="Maximum number of document resources allowed in the EPUB",
+    )
+    parser.add_argument(
+        "--max-images",
+        type=int,
+        default=ArchiveLimits.max_images,
+        help="Maximum number of image resources allowed in the EPUB",
+    )
+    parser.add_argument(
+        "--max-output-bytes",
+        type=int,
+        default=ArchiveLimits.max_output_bytes,
+        help="Maximum size of the generated HTML and extracted assets in bytes",
+    )
+
+    parser.add_argument(
         "--log-level",
         type=str,
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
-        default=None,
-        help="Set logging level (default: DEBUG if -v/--verbose, else INFO)",
+        default="INFO",
+        help="Set logging level; otherwise DEBUG is used with -v/--verbose and INFO without it",
     )
 
     parser.add_argument(
         "--log-format",
         type=str,
         default="- %(message)s",
-        help="Set logging message format (default: '- %%(message)s')",
+        help="Set logging message format",
     )
 
     args = parser.parse_args()
@@ -1362,10 +1768,10 @@ def main() -> None:
     wrap_html = args.wrap or (args.css is not None)
 
     epub_path = Path(args.epub_path)
-    if not epub_path.exists():
+    if not epub_path.is_file():
         console.print(
             Panel(
-                f"EPUB file not found: [bold]{epub_path}[/]",
+                f"EPUB file not found or is not a regular file: [bold]{epub_path}[/]",
                 title="[bold red]Conversion cannot start[/]",
                 border_style="red",
             )
@@ -1380,7 +1786,30 @@ def main() -> None:
     # Validate the expanded name before creating the directory: otherwise extract
     # mode could turn the requested HTML file path into a conflicting directory.
     images_dir_name = args.images_dir_name
-    final_images_dir_name = images_dir_name.format(stem=output_path.stem)
+    try:
+        final_images_dir_name = images_dir_name.format(stem=output_path.stem)
+    except (KeyError, ValueError, IndexError) as error:
+        console.print(
+            Panel(
+                f"Invalid images directory pattern: [bold]{error}[/]",
+                title="[bold red]Invalid output layout[/]",
+                border_style="red",
+            )
+        )
+        sys.exit(2)
+    if (
+        not final_images_dir_name
+        or Path(final_images_dir_name).name != final_images_dir_name
+        or final_images_dir_name in {".", ".."}
+    ):
+        console.print(
+            Panel(
+                "Images directory name must be a non-empty basename and may use only the {stem} placeholder.",
+                title="[bold red]Invalid output layout[/]",
+                border_style="red",
+            )
+        )
+        sys.exit(2)
     if final_images_dir_name == output_path.name:
         console.print(
             Panel(
@@ -1412,6 +1841,7 @@ def main() -> None:
     plan.add_row("Document shell", "enabled" if wrap_html else "fragment only")
     plan.add_row("TOC", "remove" if args.remove_toc else "preserve")
     plan.add_row("Cover", "remove" if args.remove_cover else "preserve")
+    plan.add_row("Content", "safe mode" if args.safe_mode else "source fidelity")
     plan.add_row("Processing", "chunked" if args.chunked else "standard")
     console.print(
         Group(
@@ -1424,6 +1854,16 @@ def main() -> None:
     )
 
     try:
+        archive_limits = ArchiveLimits(
+            max_entries=args.max_archive_entries,
+            max_compressed_bytes=args.max_compressed_bytes,
+            max_expanded_bytes=args.max_expanded_bytes,
+            max_entry_bytes=args.max_entry_bytes,
+            max_compression_ratio=args.max_compression_ratio,
+            max_documents=args.max_documents,
+            max_images=args.max_images,
+            max_output_bytes=args.max_output_bytes,
+        )
         converter = EpubConverter(
             epub_path=args.epub_path,
             html_path=output_path,
@@ -1436,6 +1876,9 @@ def main() -> None:
             remove_cover=args.remove_cover,
             images_dir_name=images_dir_name,
             chunked=args.chunked,
+            safe_html=args.safe_mode,
+            force=args.force,
+            archive_limits=archive_limits,
         )
         converter.convert()
 
