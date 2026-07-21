@@ -16,7 +16,7 @@ image/resource loads before content is emitted. Normal reading markup, headings,
 tables, footnotes, navigation links, and supported raster images are preserved
 where possible.
 
-## Installation
+## Run from the checkout (recommended)
 
 ### Prerequisites
 
@@ -56,11 +56,34 @@ where possible.
     python -m pip install -r requirements.txt
     ```
 
-3. **Optional: Install development tools** (for code quality checks):
+3. Convert a book:
 
-    ```bash
-    python -m pip install -r dev-requirements.txt
-    ```
+  ```bash
+  python main.py "path/to/book.epub" -o output.html
+  ```
+
+This is the normal workflow.
+
+### Optional installation
+
+Installation is not required for local conversion. If desired, install the tool:
+
+```bash
+python -m pip install .
+```
+
+This creates the `epub-to-html` command. It is useful for invoking the converter
+from any directory, automation or shell scripts, isolated virtual environments,
+or other Python programs. For a one-off conversion in this checkout, use
+`python main.py` instead.
+
+### Development tools
+
+Install development tools for formatting, type checking, and tests:
+
+```bash
+python -m pip install -r dev-requirements.txt
+```
 
 ## Usage
 
