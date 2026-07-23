@@ -3,6 +3,7 @@ test-command.txt
 .venv
 images/
 output.html
+report.html
 *_files/
 output_files/
 docs/

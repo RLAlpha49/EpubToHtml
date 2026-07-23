@@ -111,19 +111,28 @@ EPUB; `-h/--help` prints this reference.
 
 | Option | Purpose | Example |
 | --- | --- | --- |
-| `epub_path` | Input EPUB file. | `python main.py "book.epub"` |
+| `epub_path` | Input EPUB file or directory containing EPUB files. | `python main.py "book.epub"` |
 | `-h`, `--help` | Show help and exit. | `python main.py --help` |
 | `--version` | Show the installed tool version and exit. | `epub-to-html --version` |
 | `--print-completion {bash,zsh,fish,powershell}` | Print a complete shell-completion script and exit; it does not modify shell configuration automatically. | `epub-to-html --print-completion powershell` |
-| `-o`, `--output PATH` | Output HTML path; defaults to `output.html`. | `python main.py book.epub --output converted.html` |
+| `-o`, `--output PATH` | Output HTML file for one EPUB, or output directory for an EPUB directory. Defaults to `output.html` for a file and `output` for a directory. | `python main.py book.epub --output converted.html` |
+| `--workers N` | Maximum directory-input workers; defaults conservatively to `1`. | `python main.py books --output converted --workers 2` |
+| `--inspect` | Print EPUB metadata, spine, media inventory, layout signals, and unsupported features without writing output. | `python main.py book.epub --inspect` |
 | `-s`, `--strategy {embed,extract}` | Embed images as data URLs or extract them beside the HTML; defaults to `embed`. | `python main.py book.epub --strategy extract` |
 | `-w`, `--wrap` | Add a complete HTML document shell and default styling. It is optional when using any option that needs wrapped output. | `python main.py book.epub --wrap` |
 | `-c`, `--css PATH` | Inline a trusted local stylesheet; automatically enables wrapping. | `python main.py book.epub --css styles.css` |
 | `--remove-toc` | Remove detected table-of-contents elements. | `python main.py book.epub --remove-toc` |
 | `--remove-cover` | Remove detected cover elements. | `python main.py book.epub --remove-cover` |
+| `--spine-range START:END` | Convert a one-based inclusive chapter range; either bound may be omitted. | `python main.py book.epub --spine-range 2:8` |
+| `--exclude-content CATEGORY` | Exclude `cover`, `navigation`, `front-matter`, `endnotes`, or `appendices`; repeatable. | `python main.py book.epub --exclude-content appendices` |
 | `--images-dir-name NAME` | Extracted image directory basename; `{stem}` expands to the output filename stem. | `python main.py book.epub --strategy extract --images-dir-name assets` |
 | `--chunked` | Write prepared documents incrementally to staging; navigation requires collecting the generated sections first. | `python main.py book.epub --chunked` |
 | `--safe-mode` | Remove active markup, unsafe URLs, EPUB CSS, SVG, and invalid raster images. | `python main.py book.epub --safe-mode --wrap` |
+| `--preserve-internal-css` | Inline EPUB stylesheets and rewrite their registered local asset URLs; ignored by safe mode. | `python main.py book.epub --preserve-internal-css --wrap` |
+| `--svg-policy {omit,extract,preserve}` | Select SVG handling; safe mode always removes SVG. | `python main.py book.epub --svg-policy preserve` |
+| `--mathml-policy {omit,preserve}` | Select MathML handling; safe mode remains restrictive. | `python main.py book.epub --mathml-policy preserve` |
+| `--media-policy {omit,extract,preserve}` | Choose audio/video resource treatment. Extraction copies resources only with `--strategy extract`. | `python main.py book.epub --strategy extract --media-policy extract` |
+| `--font-policy {omit,extract,preserve}` | Choose embedded-font resource treatment. Extraction copies resources only with `--strategy extract`. | `python main.py book.epub --strategy extract --font-policy extract` |
 | `--navigation` | Add an automatically generated table of contents and back-to-top links; automatically enables wrapping. | `python main.py book.epub --navigation` |
 | `--reader-max-width CSS_VALUE` | Set wrapped reading width and automatically enable wrapping; defaults to `72ch` when wrapping is enabled. | `python main.py book.epub --reader-max-width 65ch` |
 | `--reader-font-family CSS_VALUE` | Set wrapped reading font and automatically enable wrapping; defaults to `Georgia, serif` when wrapping is enabled. | `python main.py book.epub --reader-font-family system-ui` |
@@ -134,6 +143,7 @@ EPUB; `-h/--help` prints this reference.
 | `--stable-mime-types` | Use known filename-extension MIME types instead of host-dependent MIME guessing. | `python main.py book.epub --stable-mime-types` |
 | `--newline {lf,crlf}` | Select output line endings; defaults to `lf`. | `python main.py book.epub --newline crlf` |
 | `--report-json PATH` | Write a local machine-readable conversion report. | `python main.py book.epub --report-json report.json` |
+| `--report-html PATH` | Write a companion HTML report with chapters, warnings, and output facts. | `python main.py book.epub --report-html report.html` |
 | `--no-progress` | Disable progress bars. | `python main.py book.epub --no-progress` |
 | `--force-progress` | Show progress bars even when stderr is not a TTY. | `python main.py book.epub --force-progress` |
 | `--verbose` | Show unexpected error tracebacks. | `python main.py book.epub --verbose` |
@@ -172,6 +182,24 @@ your shell, then completion is automatic in future sessions:
 
 The converter itself does not need a completion script to run; this is only shell
 help for typing commands.
+
+## Library use
+
+Python integrations can call the documented library API without subprocesses:
+
+```python
+from api import convert
+from model import ConversionOptions
+
+result = convert("book.epub", "book.html", ConversionOptions(
+    input_path="unused.epub", output_path="unused.html", safe_html=True
+))
+print(result.output_path)
+```
+
+The explicit path arguments always win; the supplied `ConversionOptions` contributes
+only conversion policy. `ConversionResult` supplies paths, counts, warnings, duration,
+and selected chapter names.
 
 ## Output behavior and limitations
 

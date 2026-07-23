@@ -50,7 +50,7 @@ dev = [
 
 [tool.setuptools]
 package-dir = {"" = "src"}
-py-modules = ["cli", "converter", "html_transform", "images", "model", "output"]
+py-modules = ["api", "batch", "cli", "converter", "html_transform", "images", "inspection", "model", "output", "report"]
 
 [tool.ruff]
 line-length = 100
@@ -81,6 +81,11 @@ files = ["src", "tests"]
 mypy_path = ["typings"]
 warn_return_any = true
 warn_unused_ignores = true
+
+[tool.pyright]
+include = ["src", "tests"]
+exclude = ["build", "dist", ".nox", "**/__pycache__", "**/.*", "**/node_modules"]
+extraPaths = ["src"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
