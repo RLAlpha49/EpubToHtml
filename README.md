@@ -74,16 +74,22 @@ python -m pip install .
 
 This creates the `epub-to-html` command. It is useful for invoking the converter
 from any directory, automation or shell scripts, isolated virtual environments,
-or other Python programs. For a one-off conversion in this checkout, use
-`python main.py` instead.
+or other Python programs.
+
+```bash
+epub-to-html "path/to/book.epub" -o output.html
+```
 
 ### Development tools
 
-Install development tools for formatting, type checking, and tests:
+Install the project and development tools:
 
 ```bash
-python -m pip install -r dev-requirements.txt
+python -m pip install -e ".[dev]"
 ```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the canonical Nox commands used for
+formatting, linting, type checks, and tests.
 
 ## Usage
 
