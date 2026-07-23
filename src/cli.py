@@ -8,7 +8,7 @@ import sys
 from collections.abc import Sequence
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any, NoReturn, cast
 
 from rich.console import Console, Group
 from rich.panel import Panel
@@ -25,7 +25,9 @@ from rich.progress import (
 from rich.table import Table
 from rich.text import Text
 
+from batch import convert_batch
 from converter import convert
+from inspection import inspect_epub
 from model import (
     ArchiveLimitError,
     ArchiveLimits,
@@ -37,6 +39,7 @@ from model import (
     OutputError,
     OutputValidationError,
 )
+from report import write_html_report
 
 console = Console(stderr=True)
 
@@ -54,6 +57,8 @@ ALL_OPTIONS = (
     "--version",
     "--print-completion",
     "--output",
+    "--workers",
+    "--inspect",
     "--strategy",
     "--wrap",
     "--css",
@@ -72,6 +77,14 @@ ALL_OPTIONS = (
     "--stable-mime-types",
     "--newline",
     "--report-json",
+    "--report-html",
+    "--spine-range",
+    "--exclude-content",
+    "--preserve-internal-css",
+    "--svg-policy",
+    "--mathml-policy",
+    "--media-policy",
+    "--font-policy",
     "--no-progress",
     "--force-progress",
     "--verbose",
@@ -229,9 +242,18 @@ def parser() -> argparse.ArgumentParser:
     content = result.add_argument_group("Content and presentation")
     safety = result.add_argument_group("Safety and reliability")
     diagnostics = result.add_argument_group("Diagnostics and automation")
-    input_output.add_argument("epub_path", type=Path, help="Path to the input EPUB file")
     input_output.add_argument(
-        "-o", "--output", type=Path, default=Path("output.html"), help="Output HTML path"
+        "epub_path", type=Path, help="Input EPUB file, or directory containing EPUB files"
+    )
+    input_output.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        help="Output file for one EPUB, or directory for an EPUB directory",
+    )
+    input_output.add_argument("--workers", type=int, default=1, help="Batch workers; default: 1")
+    input_output.add_argument(
+        "--inspect", action="store_true", help="Inspect input without creating conversion output"
     )
     input_output.add_argument(
         "-s",
@@ -251,6 +273,16 @@ def parser() -> argparse.ArgumentParser:
     )
     content.add_argument("--remove-cover", action="store_true", help="Remove cover elements")
     content.add_argument(
+        "--spine-range", help="One-based inclusive chapter range, for example 2:8 or 5:"
+    )
+    content.add_argument(
+        "--exclude-content",
+        action="append",
+        choices=("cover", "navigation", "front-matter", "endnotes", "appendices"),
+        default=[],
+        help="Exclude a semantic content category; repeatable",
+    )
+    content.add_argument(
         "--images-dir-name", default="{stem}_files", help="Extracted-image directory name"
     )
     content.add_argument(
@@ -259,6 +291,15 @@ def parser() -> argparse.ArgumentParser:
     content.add_argument(
         "--safe-mode", action="store_true", help="Sanitize active markup and unsafe URLs"
     )
+    content.add_argument(
+        "--preserve-internal-css",
+        action="store_true",
+        help="Inline EPUB stylesheets and rewrite local URLs",
+    )
+    content.add_argument("--svg-policy", choices=("omit", "extract", "preserve"), default="omit")
+    content.add_argument("--mathml-policy", choices=("omit", "preserve"), default="omit")
+    content.add_argument("--media-policy", choices=("omit", "extract", "preserve"), default="omit")
+    content.add_argument("--font-policy", choices=("omit", "extract", "preserve"), default="omit")
     content.add_argument(
         "--navigation",
         action="store_true",
@@ -292,6 +333,9 @@ def parser() -> argparse.ArgumentParser:
     )
     diagnostics.add_argument(
         "--report-json", type=Path, help="Write a machine-readable local conversion report"
+    )
+    diagnostics.add_argument(
+        "--report-html", type=Path, help="Write a companion HTML validation report"
     )
     diagnostics.add_argument("--no-progress", action="store_true", help="Disable progress bars")
     diagnostics.add_argument(
@@ -365,7 +409,7 @@ def _options(args: argparse.Namespace) -> ConversionOptions:
     )
     return ConversionOptions(
         input_path=args.epub_path,
-        output_path=args.output.resolve(),
+        output_path=resolve_output_path(args),
         image_strategy=args.strategy,
         wrap_html=(
             args.wrap
@@ -390,7 +434,34 @@ def _options(args: argparse.Namespace) -> ConversionOptions:
         navigation=args.navigation,
         reader_max_width=args.reader_max_width or "72ch",
         reader_font_family=args.reader_font_family or "Georgia, serif",
+        spine_range=_parse_spine_range(args.spine_range),
+        exclude_content=frozenset(args.exclude_content),
+        preserve_internal_css=args.preserve_internal_css,
+        svg_policy=args.svg_policy,
+        mathml_policy=args.mathml_policy,
+        media_policy=args.media_policy,
+        font_policy=args.font_policy,
     )
+
+
+def resolve_output_path(args: argparse.Namespace) -> Path:
+    """Choose the default output shape from the input shape."""
+    output = cast(Path | None, args.output)
+    if output:
+        return output.resolve()
+    return (Path("output") if args.epub_path.is_dir() else Path("output.html")).resolve()
+
+
+def _parse_spine_range(value: str | None) -> tuple[int | None, int | None] | None:
+    if value is None:
+        return None
+    try:
+        start_text, end_text = value.split(":", 1)
+        start = int(start_text) if start_text else None
+        end = int(end_text) if end_text else None
+    except ValueError as error:
+        raise ValueError("spine range must use START:END notation") from error
+    return start, end
 
 
 def _print_plan(options: ConversionOptions) -> None:
@@ -472,6 +543,41 @@ def main() -> None:
     args = parser().parse_args()
     try:
         options = _options(args)
+        input_is_directory = args.epub_path.is_dir()
+        if not args.epub_path.is_file() and not input_is_directory:
+            raise ValueError(f"Input must be an existing EPUB file or directory: {args.epub_path}")
+        if input_is_directory and options.output_path.exists() and not options.output_path.is_dir():
+            raise ValueError("A directory input requires --output to be a directory")
+        if not input_is_directory and options.output_path.exists() and options.output_path.is_dir():
+            raise ValueError("A single-file input requires --output to be an HTML file")
+        if args.inspect:
+            if input_is_directory:
+                raise ValueError("--inspect requires one EPUB file, not a directory")
+            inspection_payload = inspect_epub(args.epub_path, options).as_dict()
+            console.print_json(json.dumps(inspection_payload))
+            return
+        if input_is_directory:
+            if args.workers < 1:
+                raise ValueError("workers must be at least one")
+            batch = convert_batch((args.epub_path,), options, options.output_path, args.workers)
+            payload: dict[str, object] = {
+                "succeeded": batch.succeeded,
+                "failed": batch.failed,
+                "items": [
+                    {
+                        "input_path": str(item.input_path),
+                        "output_path": str(item.result.output_path) if item.result else None,
+                        "error": item.error,
+                    }
+                    for item in batch.items
+                ],
+            }
+            console.print_json(json.dumps(payload))
+            if args.report_json:
+                args.report_json.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+            if batch.failed:
+                raise ConversionError(f"{batch.failed} batch item(s) failed")
+            return
         _print_plan(options)
         enabled = not args.no_progress and (args.force_progress or sys.stderr.isatty())
         observer = RichProgressObserver(enabled)
@@ -511,6 +617,12 @@ def main() -> None:
     if args.report_json:
         try:
             write_report(args.report_json, result, options)
+        except OSError as error:
+            console.print(Panel(str(error), title="[bold red]Report failed[/]", border_style="red"))
+            raise SystemExit(5) from error
+    if args.report_html:
+        try:
+            write_html_report(args.report_html, result)
         except OSError as error:
             console.print(Panel(str(error), title="[bold red]Report failed[/]", border_style="red"))
             raise SystemExit(5) from error

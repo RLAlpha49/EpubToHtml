@@ -92,3 +92,48 @@ def test_report_includes_tool_version_and_policy(tmp_path: Path) -> None:
     assert payload["tool_version"] == tool_version()
     assert payload["input_path"] == str(options.input_path)
     assert payload["policy"]["navigation"] is True
+
+
+def test_cli_accepts_product_feature_controls() -> None:
+    arguments = parser().parse_args(
+        [
+            "book.epub",
+            "--output",
+            "out",
+            "--workers",
+            "2",
+            "--spine-range",
+            "2:4",
+            "--exclude-content",
+            "appendices",
+            "--preserve-internal-css",
+            "--svg-policy",
+            "preserve",
+            "--media-policy",
+            "extract",
+            "--report-html",
+            "report.html",
+        ]
+    )
+
+    assert arguments.output == Path("out")
+    assert arguments.workers == 2
+    assert arguments.spine_range == "2:4"
+    assert arguments.exclude_content == ["appendices"]
+    assert arguments.preserve_internal_css
+    assert arguments.svg_policy == "preserve"
+    assert arguments.media_policy == "extract"
+
+
+def test_cli_uses_one_output_option_for_both_input_shapes(tmp_path: Path) -> None:
+    from cli import resolve_output_path
+
+    book = tmp_path / "book.epub"
+    books = tmp_path / "books"
+    books.mkdir()
+
+    single = parser().parse_args([str(book)])
+    directory = parser().parse_args([str(books)])
+
+    assert resolve_output_path(single).name == "output.html"
+    assert resolve_output_path(directory).name == "output"

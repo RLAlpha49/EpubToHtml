@@ -12,7 +12,13 @@ import ebooklib
 from bs4 import BeautifulSoup
 from ebooklib import epub
 
-from html_transform import build_targets, decode_document, prepare_document, wrap_document
+from html_transform import (
+    build_targets,
+    decode_document,
+    prepare_document,
+    rewrite_css_urls,
+    wrap_document,
+)
 from images import EmbeddedImageOutput, ExtractedImageOutput, ImageIndex, ImageOutput
 from model import (
     ArchiveLimitError,
@@ -99,15 +105,41 @@ def _language(book: epub.EpubBook) -> str:
         return "en"
 
 
+def title(book: epub.EpubBook) -> str | None:
+    """Return the publication title for callers that inspect an EPUB."""
+    return _title(book)
+
+
+def language(book: epub.EpubBook) -> str:
+    """Return the publication language for callers that inspect an EPUB."""
+    return _language(book)
+
+
 def _documents(book: epub.EpubBook) -> list[epub.EpubItem]:
-    ordered = []
-    for entry in getattr(book, "spine", []):
-        item = book.get_item_with_id(entry[0] if isinstance(entry, tuple) else entry)
-        if item and item.get_type() == ebooklib.ITEM_DOCUMENT:
+    ordered: list[epub.EpubItem] = []
+    for entry in book.spine:
+        item_id: str = entry[0] if isinstance(entry, tuple) else entry
+        item = book.get_item_with_id(item_id)
+        if item is not None and item.get_type() == ebooklib.ITEM_DOCUMENT:
             ordered.append(item)
     return ordered or [
         item for item in book.get_items() if item.get_type() == ebooklib.ITEM_DOCUMENT
     ]
+
+
+def document_items(book: epub.EpubBook) -> list[epub.EpubItem]:
+    """Return document items in spine order for callers that inspect an EPUB."""
+    return _documents(book)
+
+
+def _selected_documents(
+    documents: list[epub.EpubItem], options: ConversionOptions
+) -> list[epub.EpubItem]:
+    """Apply a one-based inclusive spine range before document targets are allocated."""
+    if not options.spine_range:
+        return documents
+    start, end = options.spine_range
+    return documents[(start - 1 if start else 0) : end]
 
 
 def _check_cancelled(options: ConversionOptions, started_at: float) -> None:
@@ -149,10 +181,16 @@ def convert(
     book = epub.read_epub(str(options.input_path))
     _check_cancelled(options, started_at)
     items = list(book.get_items())
-    documents = _documents(book)
+    documents = _selected_documents(_documents(book), options)
     images = [
         item for item in items if item.get_type() in (ebooklib.ITEM_IMAGE, ebooklib.ITEM_COVER)
     ]
+    resources = [
+        item
+        for item in items
+        if str(item.media_type or "").startswith(("audio/", "video/", "font/", "application/font"))
+    ]
+    stylesheets = [item for item in items if str(item.media_type or "").lower() == "text/css"]
     if len(documents) > options.archive_limits.max_documents:
         raise ArchiveLimitError("EPUB contains more documents than allowed.")
     if len(images) > options.archive_limits.max_images:
@@ -185,6 +223,42 @@ def convert(
                 if observer:
                     observer.advance()
 
+        if options.image_strategy == "extract":
+            for resource in resources:
+                media_type = str(resource.media_type or "")
+                policy = options.font_policy if "font" in media_type else options.media_policy
+                if policy == "extract":
+                    try:
+                        index.add(strategy.register(resource))
+                    except (OSError, ValueError) as error:
+                        diagnostics.add("skipped-resource", str(error), resource.get_name())
+                elif policy == "preserve":
+                    diagnostics.add(
+                        "preserved-resource-reference",
+                        "Resource reference was retained; use extract mode to copy it beside HTML.",
+                        resource.get_name(),
+                    )
+                else:
+                    diagnostics.add(
+                        "omitted-resource", "Resource omitted by policy.", resource.get_name()
+                    )
+
+        internal_css = ""
+        if options.preserve_internal_css and not options.safe_html:
+            css_parts: list[str] = []
+            for stylesheet in stylesheets:
+                try:
+                    css_parts.append(
+                        rewrite_css_urls(
+                            stylesheet.get_content().decode("utf-8"), stylesheet.get_name(), index
+                        )
+                    )
+                except UnicodeDecodeError:
+                    diagnostics.add(
+                        "skipped-stylesheet", "Stylesheet is not UTF-8.", stylesheet.get_name()
+                    )
+            internal_css = "\n".join(css_parts)
+
         decoded: list[tuple[epub.EpubItem, str]] = []
         skipped_documents = 0
         if observer:
@@ -216,6 +290,9 @@ def convert(
                     options.remove_toc,
                     options.remove_cover,
                     options.safe_html,
+                    options.exclude_content,
+                    options.svg_policy,
+                    options.mathml_policy,
                 )
                 for warning in warnings:
                     diagnostics.add(warning.code, warning.message, warning.location)
@@ -228,7 +305,7 @@ def convert(
         with staged.open_html("\r\n" if options.newline == "crlf" else "\n") as output:
             if options.wrap_html and options.chunked and not options.navigation:
                 styles = (
-                    options.css
+                    "\n".join(value for value in (options.css, internal_css) if value)
                     or f"body {{ font-family: {options.reader_font_family}; line-height: 1.6; max-width: {options.reader_max_width}; margin: 0 auto; padding: clamp(1rem, 4vw, 2rem); }} img {{ max-width: 100%; height: auto; }}"
                 )
                 output.write(
@@ -242,7 +319,7 @@ def convert(
                     wrap_document(
                         "\n".join(sections()),
                         _title(book),
-                        options.css,
+                        "\n".join(value for value in (options.css, internal_css) if value) or None,
                         _language(book),
                         options.navigation,
                         options.reader_max_width,
@@ -278,4 +355,5 @@ def convert(
         options.safe_html,
         options.input_path.stat().st_size,
         options.output_path.stat().st_size,
+        chapters=tuple(item.get_name() for item, _ in decoded),
     )

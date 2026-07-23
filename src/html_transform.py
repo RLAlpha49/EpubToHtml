@@ -86,19 +86,35 @@ def build_targets(documents: Sequence[tuple[NamedDocument, str]]) -> dict[str, D
     return targets
 
 
-def remove_marked_content(soup: BeautifulSoup, remove_toc: bool, remove_cover: bool) -> None:
-    """Filter TOC/cover markers within one parsed source document."""
+def remove_marked_content(
+    soup: BeautifulSoup,
+    remove_toc: bool,
+    remove_cover: bool,
+    excluded: frozenset[str] = frozenset(),
+) -> None:
+    """Filter explicitly selected EPUB semantic sections within a source document."""
     for tag in soup.find_all(["nav", "div", "section", "article"]):
         class_value = tag.get("class")
-        classes = (
+        classes: set[str] = (
             {str(value).lower() for value in class_value}
             if isinstance(class_value, list)
             else set()
         )
         epub_types = set(str(tag.get("epub:type", "")).split())
-        if (remove_toc and ("toc" in classes or "toc" in epub_types)) or (
-            remove_cover and ("cover" in classes or "cover" in epub_types)
-        ):
+        markers: set[str] = classes | epub_types
+        selected = (
+            (remove_toc and "toc" in markers)
+            or (remove_cover and "cover" in markers)
+            or ("navigation" in excluded and bool({"toc", "landmarks", "nav"} & markers))
+            or (
+                "front-matter" in excluded
+                and bool({"frontmatter", "front-matter", "titlepage"} & markers)
+            )
+            or ("endnotes" in excluded and bool({"endnotes", "endnote", "footnotes"} & markers))
+            or ("appendices" in excluded and bool({"appendix", "appendices"} & markers))
+            or ("cover" in excluded and "cover" in markers)
+        )
+        if selected:
             tag.decompose()
 
 
@@ -115,8 +131,9 @@ def safe_url(tag_name: str, attribute: str, value: str) -> bool:
     )
 
 
-def sanitize(soup: BeautifulSoup) -> None:
+def sanitize(soup: BeautifulSoup) -> int:
     """Remove active markup, event handlers, styles, and unsafe references."""
+    removed = 0
     for tag in soup.find_all(
         {
             "base",
@@ -127,7 +144,6 @@ def sanitize(soup: BeautifulSoup) -> None:
             "iframe",
             "input",
             "link",
-            "math",
             "meta",
             "object",
             "script",
@@ -139,6 +155,10 @@ def sanitize(soup: BeautifulSoup) -> None:
         }
     ):
         tag.decompose()
+        removed += 1
+    for tag in soup.find_all("math"):
+        tag.decompose()
+        removed += 1
     for tag in soup.find_all(True):
         for attribute in tuple(tag.attrs):
             name, value = str(attribute).lower(), str(tag.attrs[attribute])
@@ -151,6 +171,8 @@ def sanitize(soup: BeautifulSoup) -> None:
                 )
             ):
                 del tag.attrs[attribute]
+                removed += 1
+    return removed
 
 
 def rewrite_images(
@@ -162,6 +184,8 @@ def rewrite_images(
         ("img", ("src",)),
         ("image", ("href", "xlink:href")),
         ("source", ("src",)),
+        ("audio", ("src",)),
+        ("video", ("src", "poster")),
     ):
         for tag in soup.find_all(tag_name):
             for attribute in attributes:
@@ -182,6 +206,17 @@ def rewrite_images(
     return warnings
 
 
+def rewrite_css_urls(css: str, source_path: str, images: ImageIndex) -> str:
+    """Rewrite resolvable local stylesheet URL values to registered asset references."""
+
+    def replace(match: re.Match[str]) -> str:
+        raw = match.group(1).strip().strip("'\"")
+        replacement, _warning = images.resolve(source_path, raw)
+        return f"url({replacement})" if replacement else match.group(0)
+
+    return re.sub(r"url\(([^)]*)\)", replace, css, flags=re.IGNORECASE)
+
+
 def prepare_document(
     item: NamedDocument,
     content: str,
@@ -190,6 +225,9 @@ def prepare_document(
     remove_toc: bool,
     remove_cover: bool,
     safe_html: bool,
+    excluded: frozenset[str] = frozenset(),
+    svg_policy: str = "omit",
+    mathml_policy: str = "omit",
 ) -> tuple[str, list[ConversionWarning]]:
     """Apply all document transformations to one already-decoded document."""
     path = normalize_epub_path(item.get_name())
@@ -207,9 +245,26 @@ def prepare_document(
                     f"#{destination_target.ids.get(unquote(parsed.fragment), destination_target.anchor)}"
                 )
     warnings = rewrite_images(soup, path, images)
-    remove_marked_content(soup, remove_toc, remove_cover)
+    remove_marked_content(soup, remove_toc, remove_cover, excluded)
+    if svg_policy == "omit" or safe_html:
+        for tag in soup.find_all("svg"):
+            tag.decompose()
+    if mathml_policy == "omit":
+        for tag in soup.find_all("math"):
+            tag.decompose()
+    if safe_html or svg_policy == "omit":
+        for tag in soup.find_all(["audio", "video"]):
+            tag.decompose()
     if safe_html:
-        sanitize(soup)
+        removed = sanitize(soup)
+        if removed:
+            warnings.append(
+                ConversionWarning(
+                    "unsafe-content-removed",
+                    f"Safe mode removed {removed} active or unsafe markup item(s).",
+                    path,
+                )
+            )
     body = soup.body
     inner = "".join(str(child) for child in body.contents) if body else str(soup)
     return (

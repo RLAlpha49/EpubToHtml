@@ -99,6 +99,13 @@ class ConversionOptions:
     navigation: bool = False
     reader_max_width: str = "72ch"
     reader_font_family: str = "Georgia, serif"
+    spine_range: tuple[int | None, int | None] | None = None
+    exclude_content: frozenset[str] = field(default_factory=frozenset[str])
+    preserve_internal_css: bool = False
+    svg_policy: Literal["omit", "extract", "preserve"] = "omit"
+    mathml_policy: Literal["omit", "preserve"] = "omit"
+    media_policy: Literal["omit", "extract", "preserve"] = "omit"
+    font_policy: Literal["omit", "extract", "preserve"] = "omit"
 
     def validate(self) -> None:
         self.archive_limits.validate()
@@ -123,6 +130,31 @@ class ConversionOptions:
             raise ValueError("newline must be 'lf' or 'crlf'")
         if not self.reader_max_width.strip() or not self.reader_font_family.strip():
             raise ValueError("reader presentation values cannot be empty")
+        if self.spine_range:
+            start, end = self.spine_range
+            if start is not None and start < 1:
+                raise ValueError("spine range start must be at least one")
+            if end is not None and end < 1:
+                raise ValueError("spine range end must be at least one")
+            if start is not None and end is not None and start > end:
+                raise ValueError("spine range start must not exceed end")
+        unknown = self.exclude_content - {
+            "cover",
+            "navigation",
+            "front-matter",
+            "endnotes",
+            "appendices",
+        }
+        if unknown:
+            raise ValueError(f"Unsupported content selector(s): {', '.join(sorted(unknown))}")
+        for name, policy, allowed in (
+            ("svg_policy", self.svg_policy, {"omit", "extract", "preserve"}),
+            ("mathml_policy", self.mathml_policy, {"omit", "preserve"}),
+            ("media_policy", self.media_policy, {"omit", "extract", "preserve"}),
+            ("font_policy", self.font_policy, {"omit", "extract", "preserve"}),
+        ):
+            if policy not in allowed:
+                raise ValueError(f"{name} has an unsupported value")
 
 
 @dataclass(frozen=True)
@@ -152,6 +184,31 @@ class ConversionResult:
     input_bytes: int = 0
     output_bytes: int = 0
     peak_memory_bytes: int | None = None
+    chapters: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class BatchItemResult:
+    """The independently recorded outcome of one batch input."""
+
+    input_path: Path
+    result: ConversionResult | None = None
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class BatchResult:
+    """Aggregate batch result that preserves successful and failed books."""
+
+    items: tuple[BatchItemResult, ...]
+
+    @property
+    def succeeded(self) -> int:
+        return sum(item.result is not None for item in self.items)
+
+    @property
+    def failed(self) -> int:
+        return len(self.items) - self.succeeded
 
 
 class WarningCollector:
