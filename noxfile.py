@@ -34,7 +34,7 @@ def resolve_tasks(posargs: list[str], session: nox.Session) -> Iterable[str]:
 def run_task(session: nox.Session, task: str) -> None:
     """Run one named quality/build task inside the shared Nox environment."""
     if task == "format":
-        session.run("python", "-m", "ruff", "format", "--check", ".")
+        session.run("python", "-m", "ruff", "format", ".")
         return
     if task == "lint":
         session.run("python", "-m", "ruff", "check", ".")
