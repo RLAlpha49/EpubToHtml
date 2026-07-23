@@ -11,10 +11,13 @@ the converter preserves source markup for fidelity. Treat the resulting HTML as
 active content and use it only with EPUBs you understand and trust.
 
 If you do not trust an EPUB or its source, pass `--safe-mode`. Safe mode removes active
-elements, event handlers, inline CSS, SVG/XML, unsafe URL schemes, and external
-image/resource loads before content is emitted. Normal reading markup, headings,
-tables, footnotes, navigation links, and supported raster images are preserved
-where possible.
+elements, event handlers, inline CSS, SVG/XML, unsafe URL schemes, and external image/resource
+loads before content is emitted. Normal reading markup, headings, tables, footnotes, navigation
+links, and supported raster images are preserved where possible.
+
+Safe mode validates embedded and extracted raster image signatures and excludes SVG. EPUB-originated
+`<style>` elements and `style` attributes are removed; a file supplied with `--css` is explicitly
+trusted local input and is inlined unchanged.
 
 ## Run from the checkout (recommended)
 
@@ -22,7 +25,7 @@ where possible.
 
 - Python 3.12 or higher
 
-### Setup Steps
+### Setup
 
 1. **Create a virtual environment** (recommended):
 
@@ -95,188 +98,48 @@ formatting, linting, type checks, and tests.
 
 ### Basic Usage
 
-Convert an EPUB file to HTML with embedded images (default behavior):
+Convert an EPUB to a single HTML file with embedded images:
 
 ```bash
-python main.py "path/to/book.epub"
+python main.py "path/to/book.epub" -o output.html
 ```
 
-Output: `output.html` (resolved to absolute path in current directory)
+### Command-Line Options and Examples
 
-### Command-Line Options
+The following reference covers every option exposed by the CLI. `epub_path` is the required input
+EPUB; `-h/--help` prints this reference.
 
-```text
-usage: main.py [options] epub_path
-
-positional arguments:
-  epub_path                   Path to the input EPUB file
-
-optional arguments:
-  -h, --help                  Show this help message and exit
-  -o, --output PATH           Path to output HTML file. Relative paths are resolved from the current working directory and normalized to absolute paths. Default: output.html
-  -s, --strategy STRATEGY     Image handling strategy: 'embed' embeds images as base64 data URLs (compact HTML, all in one file); 'extract' saves images as separate files (default: embed)
-  -w, --wrap                  Wrap content in complete HTML structure with default styling
-  -c, --css PATH              Path to a CSS file whose contents will be inlined into a <style> tag; implies --wrap
-  -v, --verbose               Enable verbose logging (DEBUG level); shorthand for --log-level DEBUG
-  --no-progress               Disable progress bars for long-running operations
-  --allow-unknown-mime        Allow images with unknown MIME types; when enabled and media type cannot be determined, images will be skipped (use --strategy extract instead)
-  --remove-toc                Remove table of contents elements (default: preserve TOC and rewrite internal links)
-  --remove-cover              Remove cover page elements (default: preserve cover)
-  --images-dir-name NAME      Directory name pattern for extracted images when using --strategy extract. Use {stem} as placeholder for HTML filename stem (default: {stem}_files)
-  --force-progress            Force progress bars even when stderr is not a TTY; useful for CI logs (respects --no-progress if set)
-  --chunked                   Process documents incrementally to reduce peak memory for very large EPUBs
-    --safe-mode                 Sanitize active HTML/CSS and unsafe resource URLs; use for untrusted EPUBs
-  --force                     Replace existing output and extracted-image directories
-  --max-archive-entries N     Maximum ZIP members (default: 10000)
-  --max-compressed-bytes N    Maximum compressed archive bytes (default: 268435456)
-  --max-expanded-bytes N      Maximum expanded archive bytes (default: 1073741824)
-  --max-entry-bytes N         Maximum expanded bytes per archive member (default: 104857600)
-  --max-compression-ratio N   Maximum member compression ratio (default: 1000)
-  --max-documents N           Maximum EPUB document items (default: 5000)
-  --max-images N              Maximum EPUB image items (default: 10000)
-  --max-output-bytes N        Maximum generated HTML bytes (default: 1073741824)
-  --log-level LEVEL           Set logging level: DEBUG, INFO, WARNING, ERROR, CRITICAL (default: DEBUG if -v/--verbose, else INFO)
-  --log-format FORMAT         Set logging message format (default: '- %(message)s')
-```
-
-### Examples
-
-**Embed all images as base64 (compact HTML file, default)**:
-
-```bash
-python main.py "book.epub" -o "output.html"
-```
-
-Output: `output.html` in current directory. The script logs the absolute path of the output file, but the actual file is created using the path provided. All images embedded as data URLs.
-
-**Embed images but allow unknown MIME types**:
-
-```bash
-python main.py "book.epub" -o "output.html" --allow-unknown-mime
-```
-
-**⚠️ Note**: When `--allow-unknown-mime` is enabled and a media type cannot be determined, the image will be skipped instead of embedding. For reliable image handling, use `--strategy extract` instead to save images as separate files.
-
-**Extract images to separate files with relative output path**:
-
-```bash
-python main.py "book.epub" -o "output.html" -s extract
-```
-
-Creates in current directory:
-
-- `output.html` - the HTML file
-- `output_files/` - folder containing extracted images (default directory name)
-- Images are referenced with relative paths: `output_files/image_name.ext`
-
-**Extract images with custom directory name**:
-
-```bash
-python main.py "book.epub" -o "output.html" -s extract --images-dir-name "images"
-```
-
-Creates:
-
-- `output.html` - the HTML file
-- `images/` - folder containing extracted images
-- Images are referenced with relative paths: `images/image_name.ext`
-
-**Extract images using an absolute path**:
-
-```bash
-python main.py "book.epub" -o "/home/user/output.html" -s extract
-```
-
-Creates:
-
-- `/home/user/output.html` - the HTML file
-- `/home/user/output_files/` - folder containing extracted images
-- Images are referenced with relative paths: `output_files/image_name.ext`
-
-**Windows PowerShell example with extract strategy**:
-
-```powershell
-python main.py "C:\Users\Books\book.epub" -o "C:\Output\book.html" -s extract
-```
-
-Creates:
-
-- `C:\Output\book.html` - the HTML file
-- `C:\Output\book_files\` - folder containing extracted images
-- Logs display absolute paths; the actual output uses the path provided
-
-**POSIX shell example with extract strategy**:
-
-```bash
-python main.py "/home/user/book.epub" -o "/tmp/output.html" -s extract
-```
-
-Creates:
-
-- `/tmp/output.html` - the HTML file
-- `/tmp/output_files/` - folder containing extracted images
-
-**Remove the table of contents**:
-
-```bash
-python main.py "book.epub" -o "output.html" --remove-toc
-```
-
-Removes EPUB navigation and table-of-contents elements from the output. Internal links are preserved when the table of contents is not removed.
-
-**Remove the cover page**:
-
-```bash
-python main.py "book.epub" -o "output.html" --remove-cover
-```
-
-Removes cover-page elements identified by common EPUB cover markers.
-
-**Wrap in HTML structure with default styling**:
-
-```bash
-python main.py "book.epub" -w -o "output.html"
-```
-
-Output: Complete HTML5 document with DOCTYPE, head, and body tags, including default CSS styling for readability.
-
-**Use custom CSS file** (implies `--wrap`):
-
-```bash
-python main.py "book.epub" -c "styles.css" -o "output.html"
-```
-
-Inlines the CSS from `styles.css` into a `<style>` tag and automatically wraps the content in a complete HTML structure. The `-c/--css` option always implies `--wrap`, so you don't need to specify both.
-
-**Enable debug logging with custom format**:
-
-```bash
-python main.py "book.epub" -v -o "output.html"
-```
-
-Shows DEBUG-level log messages. Use `--log-level` to set a different level:
-
-```bash
-python main.py "book.epub" --log-level WARNING -o "output.html"
-```
-
-**Force progress bars in CI/non-TTY environment**:
-
-```bash
-python main.py "book.epub" --force-progress -o "output.html"
-```
-
-By default, progress bars are disabled when running in non-interactive environments. Use `--force-progress` to enable them in CI logs.
-
-**Process a very large EPUB incrementally**:
-
-```bash
-python main.py "large-book.epub" --chunked -o "output.html"
-```
-
-Use this mode when memory is limited or the book has thousands of pages. It processes
-each source document independently before merging the results. For ordinary books,
-the default mode is usually simpler and just as fast.
+| Option | Purpose | Example |
+| --- | --- | --- |
+| `epub_path` | Input EPUB file. | `python main.py "book.epub"` |
+| `-h`, `--help` | Show help and exit. | `python main.py --help` |
+| `-o`, `--output PATH` | Output HTML path; defaults to `output.html`. | `python main.py book.epub --output converted.html` |
+| `-s`, `--strategy {embed,extract}` | Embed images as data URLs or extract them beside the HTML; defaults to `embed`. | `python main.py book.epub --strategy extract` |
+| `-w`, `--wrap` | Add a complete HTML document shell and default styling. | `python main.py book.epub --wrap` |
+| `-c`, `--css PATH` | Inline a trusted local stylesheet; also enables wrapping. | `python main.py book.epub --css styles.css` |
+| `--remove-toc` | Remove detected table-of-contents elements. | `python main.py book.epub --remove-toc` |
+| `--remove-cover` | Remove detected cover elements. | `python main.py book.epub --remove-cover` |
+| `--images-dir-name NAME` | Extracted image directory basename; `{stem}` expands to the output filename stem. | `python main.py book.epub --strategy extract --images-dir-name assets` |
+| `--chunked` | Write prepared documents incrementally to staging. | `python main.py book.epub --chunked` |
+| `--safe-mode` | Remove active markup, unsafe URLs, EPUB CSS, SVG, and invalid raster images. | `python main.py book.epub --safe-mode --wrap` |
+| `--force` | Replace existing HTML and extracted-image output. | `python main.py book.epub --force` |
+| `--deadline-seconds N` | Cancel conversion after the cooperative deadline. | `python main.py book.epub --deadline-seconds 30` |
+| `--fail-on-warning` | Abort without publishing if conversion warnings occur. | `python main.py book.epub --fail-on-warning` |
+| `--no-validate-output` | Skip staged duplicate-ID and local-reference checks. | `python main.py book.epub --no-validate-output` |
+| `--stable-mime-types` | Use known filename-extension MIME types instead of host-dependent MIME guessing. | `python main.py book.epub --stable-mime-types` |
+| `--newline {lf,crlf}` | Select output line endings; defaults to `lf`. | `python main.py book.epub --newline crlf` |
+| `--report-json PATH` | Write a local machine-readable conversion report. | `python main.py book.epub --report-json report.json` |
+| `--no-progress` | Disable progress bars. | `python main.py book.epub --no-progress` |
+| `--force-progress` | Show progress bars even when stderr is not a TTY. | `python main.py book.epub --force-progress` |
+| `--verbose` | Show unexpected error tracebacks. | `python main.py book.epub --verbose` |
+| `--max-archive-entries N` | Maximum ZIP member count; defaults to `10000`. | `python main.py book.epub --max-archive-entries 2000` |
+| `--max-compressed-bytes N` | Maximum compressed archive size; defaults to `268435456`. | `python main.py book.epub --max-compressed-bytes 50000000` |
+| `--max-expanded-bytes N` | Maximum expanded archive size; defaults to `1073741824`. | `python main.py book.epub --max-expanded-bytes 500000000` |
+| `--max-entry-bytes N` | Maximum expanded size of one archive member; defaults to `104857600`. | `python main.py book.epub --max-entry-bytes 50000000` |
+| `--max-compression-ratio N` | Maximum ZIP compression ratio; defaults to `1000`. | `python main.py book.epub --max-compression-ratio 500` |
+| `--max-documents N` | Maximum EPUB document items; defaults to `5000`. | `python main.py book.epub --max-documents 1000` |
+| `--max-images N` | Maximum EPUB image items; defaults to `10000`. | `python main.py book.epub --max-images 2000` |
+| `--max-output-bytes N` | Maximum generated output size; defaults to `1073741824`. | `python main.py book.epub --max-output-bytes 500000000` |
 
 ### Safe mode for untrusted EPUBs
 
