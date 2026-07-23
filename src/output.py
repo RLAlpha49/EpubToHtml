@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import stat
 import tempfile
 from pathlib import Path
 from typing import TextIO
@@ -23,6 +24,7 @@ class StagedOutput:
         self.images_path: Path | None = None
 
     def __enter__(self) -> StagedOutput:
+        self._reject_reparse_points()
         if self.final_html.exists() and not self.force:
             raise OutputError(
                 f"Output already exists: {self.final_html}. Use --force to replace it."
@@ -39,10 +41,24 @@ class StagedOutput:
         self.images_path = self.root / self.final_images.name if self.final_images else None
         return self
 
-    def open_html(self) -> TextIO:
+    def open_html(self, newline: str = "\n") -> TextIO:
+        """Open the HTML output file for writing."""
         if self.html_path is None:
             raise OutputError("Output staging was not initialized")
-        return self.html_path.open("w", encoding="utf-8", newline="\n")
+        return self.html_path.open("w", encoding="utf-8", newline=newline)
+
+    def _reject_reparse_points(self) -> None:
+        """Avoid publishing into a symlink/reparse-point path in shared directories."""
+        for path in (self.final_html, self.final_images):
+            if path is None:
+                continue
+            for parent in (path.parent, *path.parent.parents):
+                attributes = (
+                    getattr(parent.stat(), "st_file_attributes", 0) if parent.exists() else 0
+                )
+                reparse_point = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+                if parent.exists() and (parent.is_symlink() or attributes & reparse_point):
+                    raise OutputError(f"Refusing output through symbolic link directory: {parent}")
 
     def size(self) -> int:
         return (
@@ -72,9 +88,10 @@ class StagedOutput:
                 committed.append(self.final_images)
         except OSError as error:
             for target in reversed(committed):
-                shutil.rmtree(target, ignore_errors=True) if target.is_dir() else target.unlink(
-                    missing_ok=True
-                )
+                if target.is_dir():
+                    shutil.rmtree(target, ignore_errors=True)
+                else:
+                    target.unlink(missing_ok=True)
             for target, saved in reversed(moved):
                 if saved.exists():
                     os.replace(saved, target)

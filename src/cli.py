@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 from typing import NoReturn
@@ -25,6 +26,7 @@ from rich.text import Text
 from converter import convert
 from model import (
     ArchiveLimits,
+    ConversionCancelledError,
     ConversionError,
     ConversionObserver,
     ConversionOptions,
@@ -118,6 +120,26 @@ def parser() -> argparse.ArgumentParser:
         "--safe-mode", action="store_true", help="Sanitize active markup and unsafe URLs"
     )
     result.add_argument("--force", action="store_true", help="Replace existing output")
+    result.add_argument(
+        "--deadline-seconds", type=float, help="Cancel after this conversion deadline"
+    )
+    result.add_argument(
+        "--fail-on-warning", action="store_true", help="Do not publish output if warnings occur"
+    )
+    result.add_argument(
+        "--no-validate-output", action="store_true", help="Skip staged HTML integrity checks"
+    )
+    result.add_argument(
+        "--stable-mime-types",
+        action="store_true",
+        help="Use extension-based MIME types instead of host-dependent guessing",
+    )
+    result.add_argument(
+        "--newline", choices=("lf", "crlf"), default="lf", help="Output line ending"
+    )
+    result.add_argument(
+        "--report-json", type=Path, help="Write a machine-readable local conversion report"
+    )
     result.add_argument("--no-progress", action="store_true", help="Disable progress bars")
     result.add_argument(
         "--force-progress", action="store_true", help="Show progress bars without a TTY"
@@ -163,6 +185,12 @@ def _options(args: argparse.Namespace) -> ConversionOptions:
         args.safe_mode,
         args.force,
         limits,
+        args.deadline_seconds,
+        None,
+        args.fail_on_warning,
+        not args.no_validate_output,
+        args.stable_mime_types,
+        args.newline,
     )
 
 
@@ -190,7 +218,10 @@ def _print_result(result: ConversionResult) -> None:
     summary.add_row("Documents", str(result.documents_processed))
     summary.add_row("Images processed", str(result.images_processed))
     summary.add_row("Skipped images", str(result.skipped_images))
+    summary.add_row("Skipped documents", str(result.skipped_documents))
     summary.add_row("Duration", f"{result.duration_seconds:.2f}s")
+    summary.add_row("Input size", f"{result.input_bytes:,} bytes")
+    summary.add_row("Output size", f"{result.output_bytes:,} bytes")
     if result.images_path:
         summary.add_row("Images directory", str(result.images_path))
     summary.add_row("HTML output", str(result.output_path))
@@ -200,6 +231,31 @@ def _print_result(result: ConversionResult) -> None:
         console.print(f"[yellow]Warning:[/] {warning.message}{location}")
     if len(result.warnings) > 10:
         console.print(f"[yellow]… and {len(result.warnings) - 10} more warning(s).[/]")
+
+
+def _write_report(path: Path, result: ConversionResult) -> None:
+    """Write a local JSON report for automation; no telemetry is sent."""
+    path.write_text(
+        json.dumps(
+            {
+                "status": "success",
+                "output_path": str(result.output_path),
+                "images_path": str(result.images_path) if result.images_path else None,
+                "documents_processed": result.documents_processed,
+                "images_processed": result.images_processed,
+                "skipped_images": result.skipped_images,
+                "skipped_documents": result.skipped_documents,
+                "decode_fallbacks": result.decode_fallbacks,
+                "duration_seconds": result.duration_seconds,
+                "input_bytes": result.input_bytes,
+                "output_bytes": result.output_bytes,
+                "warnings": [warning.__dict__ for warning in result.warnings],
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
 
 def main() -> None:
@@ -214,9 +270,14 @@ def main() -> None:
             result = convert(options, observer)
         finally:
             observer.close()
+    except KeyboardInterrupt:
+        console.print(
+            Panel("Conversion cancelled.", title="[bold yellow]Cancelled[/]", border_style="yellow")
+        )
+        raise SystemExit(130) from None
     except (ConversionError, OSError, ValueError) as error:
         console.print(Panel(str(error), title="[bold red]Conversion failed[/]", border_style="red"))
-        raise SystemExit(1) from error
+        raise SystemExit(130 if isinstance(error, ConversionCancelledError) else 1) from error
     except Exception:
         if args.verbose:
             console.print_exception()
@@ -230,6 +291,8 @@ def main() -> None:
             )
         raise SystemExit(3) from None
     _print_result(result)
+    if args.report_json:
+        _write_report(args.report_json, result)
 
 
 if __name__ == "__main__":

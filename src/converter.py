@@ -6,18 +6,23 @@ import stat
 import zipfile
 from html import escape
 from pathlib import Path
+from time import monotonic
 
 import ebooklib
+from bs4 import BeautifulSoup
 from ebooklib import epub
 
 from html_transform import build_targets, decode_document, prepare_document, wrap_html
 from images import EmbeddedImageOutput, ExtractedImageOutput, ImageIndex, ImageOutput
 from model import (
     ArchiveLimitError,
+    ConversionCancelledError,
+    ConversionError,
     ConversionObserver,
     ConversionOptions,
     ConversionResult,
     InvalidEpubError,
+    OutputValidationError,
     WarningCollector,
 )
 from output import StagedOutput
@@ -95,11 +100,36 @@ def _documents(book: epub.EpubBook) -> list[epub.EpubItem]:
     ]
 
 
+def _check_cancelled(options: ConversionOptions, started_at: float) -> None:
+    if options.cancellation_requested and options.cancellation_requested():
+        raise ConversionCancelledError("Conversion was cancelled.")
+    if options.deadline_seconds and monotonic() - started_at >= options.deadline_seconds:
+        raise ConversionCancelledError("Conversion deadline expired.")
+
+
+def _validate_staged_html(path: Path) -> None:
+    soup = BeautifulSoup(path.read_text(encoding="utf-8"), "html.parser")
+    ids = [str(tag["id"]) for tag in soup.find_all(id=True)]
+    if len(ids) != len(set(ids)):
+        raise OutputValidationError("Generated output contains duplicate HTML IDs.")
+    known = set(ids)
+    for link in soup.find_all("a", href=True):
+        href = str(link["href"])
+        if href.startswith("#") and href[1:] and href[1:] not in known:
+            raise OutputValidationError(f"Generated output has unresolved local link: {href}")
+    for tag in soup.find_all(src=True):
+        source = str(tag["src"])
+        if source and not source.startswith(("data:", "http:", "https:", "//")):
+            raise OutputValidationError(f"Generated output has unresolved local resource: {source}")
+
+
 def convert(
     options: ConversionOptions, observer: ConversionObserver | None = None
 ) -> ConversionResult:
     """Convert one EPUB according to an immutable policy and return its outcome."""
     options.validate()
+    started_at = monotonic()
+    _check_cancelled(options, started_at)
     if observer:
         observer.phase("Validating EPUB archive")
     preflight_archive(options.input_path, options)
@@ -107,6 +137,7 @@ def convert(
     if observer:
         observer.phase("Reading EPUB")
     book = epub.read_epub(str(options.input_path))
+    _check_cancelled(options, started_at)
     items = list(book.get_items())
     documents = _documents(book)
     images = [
@@ -125,14 +156,15 @@ def convert(
     with StagedOutput(options.output_path, images_name, options.force) as staged:
         strategy: ImageOutput
         if staged.images_path:
-            strategy = ExtractedImageOutput(staged.images_path)
+            strategy = ExtractedImageOutput(staged.images_path, options.safe_html)
         else:
-            strategy = EmbeddedImageOutput()
+            strategy = EmbeddedImageOutput(options.safe_html, options.stable_mime_types)
         index = ImageIndex()
         processed_images = skipped = 0
         if observer:
             observer.phase("Processing images", len(images), "img")
         for image in images:
+            _check_cancelled(options, started_at)
             try:
                 index.add(strategy.register(image))
                 processed_images += 1
@@ -144,13 +176,19 @@ def convert(
                     observer.advance()
 
         decoded: list[tuple[epub.EpubItem, str]] = []
+        skipped_documents = 0
         if observer:
             observer.phase("Decoding documents", len(documents), "doc")
         for document in documents:
-            content, warning = decode_document(document)
-            decoded.append((document, content))
-            if warning:
-                diagnostics.add(warning.code, warning.message, warning.location)
+            _check_cancelled(options, started_at)
+            try:
+                content, warning = decode_document(document)
+                decoded.append((document, content))
+                if warning:
+                    diagnostics.add(warning.code, warning.message, warning.location)
+            except (OSError, ValueError) as error:
+                skipped_documents += 1
+                diagnostics.add("skipped-document", str(error), document.get_name())
             if observer:
                 observer.advance()
         targets = build_targets(decoded)
@@ -159,6 +197,7 @@ def convert(
             if observer:
                 observer.phase("Extracting content", len(decoded), "doc")
             for document, content in decoded:
+                _check_cancelled(options, started_at)
                 section, warnings = prepare_document(
                     document,
                     content,
@@ -176,7 +215,7 @@ def convert(
 
         if observer:
             observer.phase("Writing output")
-        with staged.open_html() as output:
+        with staged.open_html("\r\n" if options.newline == "crlf" else "\n") as output:
             if options.wrap_html and options.chunked:
                 styles = (
                     options.css
@@ -197,6 +236,12 @@ def convert(
                 output.write("\n".join(sections()))
         if staged.size() > options.archive_limits.max_output_bytes:
             raise ArchiveLimitError("Generated output exceeds configured output limit.")
+        if options.validate_output and staged.html_path:
+            _validate_staged_html(staged.html_path)
+        if options.fail_on_warning and diagnostics.warnings:
+            raise ConversionError(
+                "Conversion produced warnings and --fail-on-warning was requested."
+            )
         staged.commit()
 
     return ConversionResult(
@@ -205,9 +250,12 @@ def convert(
         len(documents),
         processed_images,
         skipped,
+        skipped_documents,
         sum(warning.code == "decode-fallback" for warning in diagnostics.warnings),
         diagnostics.warnings,
         diagnostics.duration_seconds,
         options.chunked,
         options.safe_html,
+        options.input_path.stat().st_size,
+        options.output_path.stat().st_size,
     )

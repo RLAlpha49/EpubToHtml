@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import html
-import posixpath
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Protocol
 from urllib.parse import unquote, urlsplit
@@ -12,7 +13,7 @@ from urllib.parse import unquote, urlsplit
 from bs4 import BeautifulSoup
 from ebooklib import epub
 
-from images import ImageIndex, normalize_epub_path
+from images import ImageIndex, normalize_epub_path, resolve_epub_path
 from model import ConversionWarning
 
 
@@ -35,6 +36,11 @@ def anchor_component(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-") or "item"
 
 
+def stable_anchor(value: str) -> str:
+    """Keep a readable anchor prefix while preventing Unicode slug collisions."""
+    return f"{anchor_component(value)}-{hashlib.sha256(value.encode('utf-8')).hexdigest()[:10]}"
+
+
 def decode_document(item: epub.EpubItem) -> tuple[str, ConversionWarning | None]:
     """Decode once, preferring UTF-8 then a deterministic inspectable fallback."""
     content = item.get_content()
@@ -44,25 +50,25 @@ def decode_document(item: epub.EpubItem) -> tuple[str, ConversionWarning | None]
         try:
             import chardet
 
-            detected = chardet.detect(content)
+            detected = chardet.detect(content[:65_536])
             encoding = detected.get("encoding") if detected.get("confidence", 0) >= 0.5 else None
         except ImportError:
             encoding = None
         encoding = encoding or "latin-1"
         return content.decode(encoding, errors="replace"), ConversionWarning(
             "decode-fallback",
-            f"Decoded document using {encoding} after UTF-8 failed.",
+            f"Decoded document using {encoding} after UTF-8 failed (sampled up to 65536 bytes).",
             item.get_name(),
         )
 
 
-def build_targets(documents: list[tuple[epub.EpubItem, str]]) -> dict[str, DocumentTarget]:
+def build_targets(documents: Sequence[tuple[NamedDocument, str]]) -> dict[str, DocumentTarget]:
     """Allocate all targets before rewriting forward-facing internal links."""
     targets: dict[str, DocumentTarget] = {}
     used_anchors: set[str] = set()
     for item, content in documents:
         path = normalize_epub_path(item.get_name())
-        base = f"epub-{anchor_component(path)}"
+        base = f"epub-{stable_anchor(path)}"
         anchor, suffix = base, 2
         while anchor in used_anchors:
             anchor, suffix = f"{base}-{suffix}", suffix + 1
@@ -71,9 +77,9 @@ def build_targets(documents: list[tuple[epub.EpubItem, str]]) -> dict[str, Docum
         used_ids: set[str] = set()
         for tag in BeautifulSoup(content, "html.parser").find_all(id=True):
             original = str(tag["id"])
-            candidate, count = f"{anchor}--{anchor_component(original)}", 2
+            candidate, count = f"{anchor}--{stable_anchor(original)}", 2
             while candidate in used_ids:
-                candidate, count = f"{anchor}--{anchor_component(original)}-{count}", count + 1
+                candidate, count = f"{anchor}--{stable_anchor(original)}-{count}", count + 1
             used_ids.add(candidate)
             ids.setdefault(original, candidate)
         targets[path] = DocumentTarget(anchor, ids)
@@ -195,12 +201,8 @@ def prepare_document(
     for link in soup.find_all("a", href=True):
         parsed = urlsplit(str(link["href"]))
         if not (parsed.scheme or parsed.netloc or parsed.query or parsed.path.startswith("/")):
-            destination = (
-                path
-                if not parsed.path
-                else normalize_epub_path(posixpath.join(posixpath.dirname(path), parsed.path))
-            )
-            if destination_target := targets.get(destination):
+            destination = path if not parsed.path else resolve_epub_path(path, str(link["href"]))
+            if destination and (destination_target := targets.get(destination)):
                 link["href"] = (
                     f"#{destination_target.ids.get(unquote(parsed.fragment), destination_target.anchor)}"
                 )

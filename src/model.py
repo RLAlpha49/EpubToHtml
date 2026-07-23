@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from time import monotonic
@@ -26,6 +27,14 @@ class ArchiveLimitError(ConversionError):
 
 class OutputError(ConversionError):
     """Raised when output cannot be written or committed safely."""
+
+
+class ConversionCancelledError(ConversionError):
+    """Raised when a caller cancels conversion or its deadline expires."""
+
+
+class OutputValidationError(ConversionError):
+    """Raised when staged HTML fails requested integrity checks."""
 
 
 class ConversionObserver(Protocol):
@@ -81,6 +90,12 @@ class ConversionOptions:
     safe_html: bool = False
     force: bool = False
     archive_limits: ArchiveLimits = field(default_factory=ArchiveLimits)
+    deadline_seconds: float | None = None
+    cancellation_requested: Callable[[], bool] | None = field(default=None, compare=False)
+    fail_on_warning: bool = False
+    validate_output: bool = True
+    stable_mime_types: bool = False
+    newline: Literal["lf", "crlf"] = "lf"
 
     def validate(self) -> None:
         self.archive_limits.validate()
@@ -99,6 +114,10 @@ class ConversionOptions:
             raise ValueError("images_dir_name must not use a Windows reserved device name")
         if self.image_strategy == "extract" and expanded == self.output_path.name:
             raise ValueError("images_dir_name cannot equal the output HTML filename")
+        if self.deadline_seconds is not None and self.deadline_seconds <= 0:
+            raise ValueError("deadline_seconds must be greater than zero")
+        if self.newline not in {"lf", "crlf"}:
+            raise ValueError("newline must be 'lf' or 'crlf'")
 
 
 @dataclass(frozen=True)
@@ -119,11 +138,15 @@ class ConversionResult:
     documents_processed: int
     images_processed: int
     skipped_images: int
+    skipped_documents: int
     decode_fallbacks: int
     warnings: tuple[ConversionWarning, ...]
     duration_seconds: float
     chunked: bool
     safe_html: bool
+    input_bytes: int = 0
+    output_bytes: int = 0
+    peak_memory_bytes: int | None = None
 
 
 class WarningCollector:

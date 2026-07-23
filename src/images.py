@@ -20,6 +20,16 @@ def normalize_epub_path(path: str) -> str:
     return posixpath.normpath(unquote(path).replace("\\", "/")).removeprefix("./")
 
 
+def resolve_epub_path(document_path: str, reference: str) -> str | None:
+    """Resolve an inert EPUB-local URI path; queries and fragments never affect lookup."""
+    parsed = urlsplit(reference)
+    if parsed.scheme or parsed.netloc or not parsed.path or parsed.path.startswith("/"):
+        return None
+    return normalize_epub_path(
+        posixpath.join(posixpath.dirname(normalize_epub_path(document_path)), parsed.path)
+    )
+
+
 @dataclass(frozen=True)
 class ImageReference:
     """The source item and its HTML replacement URL."""
@@ -50,8 +60,9 @@ class ImageIndex:
         parsed = urlsplit(url)
         if parsed.scheme or parsed.netloc or not parsed.path or parsed.path.startswith("/"):
             return None, None
-        source = normalize_epub_path(document_path)
-        resolved = normalize_epub_path(posixpath.join(posixpath.dirname(source), parsed.path))
+        resolved = resolve_epub_path(document_path, url)
+        if resolved is None:
+            return None, None
         if replacement := self._full_paths.get(resolved):
             return replacement, None
         if replacement := self._full_paths.get(normalize_epub_path(parsed.path)):
@@ -68,39 +79,53 @@ class ImageIndex:
         return None, None
 
 
-def media_type_for(item: epub.EpubItem) -> str | None:
+def media_type_for(item: epub.EpubItem, stable_mime_types: bool = False) -> str | None:
     """Determine a stable web media type from manifest metadata or common extensions."""
     if item.media_type:
         return item.media_type
-    return mimetypes.guess_type(item.get_name())[0] or {
+    known_types = {
         ".jpg": "image/jpeg",
         ".jpeg": "image/jpeg",
         ".png": "image/png",
         ".gif": "image/gif",
         ".webp": "image/webp",
         ".svg": "image/svg+xml",
-    }.get(Path(item.get_name()).suffix.lower())
+    }
+    known = known_types.get(Path(item.get_name()).suffix.lower())
+    return known if stable_mime_types else known or mimetypes.guess_type(item.get_name())[0]
 
 
 class EmbeddedImageOutput:
     """Register images as self-contained data URLs."""
 
+    def __init__(self, safe: bool = False, stable_mime_types: bool = False) -> None:
+        self.safe = safe
+        self.stable_mime_types = stable_mime_types
+
     def register(self, item: epub.EpubItem) -> ImageReference:
-        media_type = media_type_for(item)
+        media_type = media_type_for(item, self.stable_mime_types)
         if not media_type:
             raise ValueError(f"Cannot determine media type for image {item.get_name()!r}")
-        encoded = base64.b64encode(item.get_content()).decode("ascii")
+        content = item.get_content()
+        if self.safe and not supported_raster_image(media_type, content):
+            raise ValueError(f"Unsupported or invalid safe-mode image: {item.get_name()!r}")
+        encoded = base64.b64encode(content).decode("ascii")
         return ImageReference(item.get_name(), f"data:{media_type};base64,{encoded}")
 
 
 class ExtractedImageOutput:
     """Register images in a private staging directory using collision-safe names."""
 
-    def __init__(self, directory: Path) -> None:
+    def __init__(self, directory: Path, safe: bool = False) -> None:
         self.directory = directory
         self._used_names: set[str] = set()
+        self.safe = safe
 
     def register(self, item: epub.EpubItem) -> ImageReference:
+        media_type = media_type_for(item)
+        content = item.get_content()
+        if self.safe and (not media_type or not supported_raster_image(media_type, content)):
+            raise ValueError(f"Unsupported or invalid safe-mode image: {item.get_name()!r}")
         original = Path(item.get_name()).name
         stem, suffix = Path(original).stem or "image", Path(original).suffix or ".jpg"
         candidate, count = f"{stem}{suffix}", 1
@@ -110,8 +135,23 @@ class ExtractedImageOutput:
         self._used_names.add(candidate)
         self.directory.mkdir(parents=True, exist_ok=True)
         with (self.directory / candidate).open("xb") as output:
-            output.write(item.get_content())
+            output.write(content)
         return ImageReference(
             item.get_name(),
             "/".join(quote(part, safe="") for part in (self.directory.name, candidate)),
         )
+
+
+def supported_raster_image(media_type: str, content: bytes) -> bool:
+    """Accept only common inert raster formats whose signatures match their MIME type."""
+    match media_type.lower():
+        case "image/png":
+            return content.startswith(b"\x89PNG\r\n\x1a\n")
+        case "image/jpeg":
+            return content.startswith(b"\xff\xd8\xff")
+        case "image/gif":
+            return content.startswith((b"GIF87a", b"GIF89a"))
+        case "image/webp":
+            return content.startswith(b"RIFF") and content[8:12] == b"WEBP"
+        case _:
+            return False

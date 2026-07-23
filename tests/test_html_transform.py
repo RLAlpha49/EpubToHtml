@@ -1,6 +1,6 @@
 from bs4 import BeautifulSoup
 
-from html_transform import DocumentTarget, prepare_document, sanitize, wrap_html
+from html_transform import DocumentTarget, build_targets, prepare_document, sanitize, wrap_html
 from images import ImageIndex
 
 
@@ -53,3 +53,30 @@ def test_wrapped_title_is_escaped() -> None:
 
     assert "&lt;/title&gt;" in html
     assert "<title></title>" not in html
+
+
+def test_queries_are_preserved_while_local_fragments_are_rewritten() -> None:
+    targets = {
+        "text/a.xhtml": DocumentTarget("epub-a", {}),
+        "text/b.xhtml": DocumentTarget("epub-b", {"end": "epub-b--end"}),
+    }
+    content = (
+        '<body><a href="b.xhtml#end">local</a><a href="b.xhtml?edition=2#end">query</a></body>'
+    )
+
+    result, _ = prepare_document(
+        Item("text/a.xhtml"), content, targets, ImageIndex(), False, False, False
+    )
+
+    assert 'href="#epub-b--end"' in result
+    assert 'href="b.xhtml?edition=2#end"' in result
+
+
+def test_targets_add_stable_hashes_for_unicode_slug_collisions() -> None:
+    first = build_targets([(Item("text/Å.xhtml"), '<p id="Å">one</p>')])
+    second = build_targets([(Item("text/Å.xhtml"), '<p id="Å">one</p>')])
+
+    target = first["text/Å.xhtml"]
+    assert target == second["text/Å.xhtml"]
+    assert target.anchor.startswith("epub-text-xhtml-")
+    assert target.ids["Å"].startswith(f"{target.anchor}--item-")
