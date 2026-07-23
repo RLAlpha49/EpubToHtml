@@ -12,7 +12,7 @@ import ebooklib
 from bs4 import BeautifulSoup
 from ebooklib import epub
 
-from html_transform import build_targets, decode_document, prepare_document, wrap_html
+from html_transform import build_targets, decode_document, prepare_document, wrap_document
 from images import EmbeddedImageOutput, ExtractedImageOutput, ImageIndex, ImageOutput
 from model import (
     ArchiveLimitError,
@@ -87,6 +87,16 @@ def _title(book: epub.EpubBook) -> str | None:
         return None
     except (AttributeError, IndexError, TypeError):
         return None
+
+
+def _language(book: epub.EpubBook) -> str:
+    """Return EPUB language metadata when present, with English as the shell fallback."""
+    try:
+        value = book.get_metadata("DC", "language")[0]
+        value = value[0] if isinstance(value, tuple) else value
+        return value if isinstance(value, str) else "en"
+    except (AttributeError, IndexError, TypeError):
+        return "en"
 
 
 def _documents(book: epub.EpubBook) -> list[epub.EpubItem]:
@@ -216,19 +226,29 @@ def convert(
         if observer:
             observer.phase("Writing output")
         with staged.open_html("\r\n" if options.newline == "crlf" else "\n") as output:
-            if options.wrap_html and options.chunked:
+            if options.wrap_html and options.chunked and not options.navigation:
                 styles = (
                     options.css
-                    or "body { font-family: Georgia, serif; line-height: 1.6; max-width: 900px; margin: 0 auto; padding: 20px; } img { max-width: 100%; height: auto; }"
+                    or f"body {{ font-family: {options.reader_font_family}; line-height: 1.6; max-width: {options.reader_max_width}; margin: 0 auto; padding: clamp(1rem, 4vw, 2rem); }} img {{ max-width: 100%; height: auto; }}"
                 )
                 output.write(
-                    f'<!DOCTYPE html>\n<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>{escape(_title(book) or "EPUB Document", quote=True)}</title><style>{styles}</style></head><body>'
+                    f'<!DOCTYPE html>\n<html lang="{escape(_language(book), quote=True)}"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>{escape(_title(book) or "EPUB Document", quote=True)}</title><style>{styles}</style></head><body id="top"><a class="skip-link" href="#main-content">Skip to content</a><main id="main-content" tabindex="-1">'
                 )
                 for section in sections():
                     output.write(section + "\n")
-                output.write("</body></html>\n")
+                output.write("</main></body></html>\n")
             elif options.wrap_html:
-                output.write(wrap_html("\n".join(sections()), _title(book), options.css))
+                output.write(
+                    wrap_document(
+                        "\n".join(sections()),
+                        _title(book),
+                        options.css,
+                        _language(book),
+                        options.navigation,
+                        options.reader_max_width,
+                        options.reader_font_family,
+                    )
+                )
             elif options.chunked:
                 for section in sections():
                     output.write(section + "\n")

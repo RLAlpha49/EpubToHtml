@@ -5,8 +5,10 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections.abc import Sequence
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import NoReturn
+from typing import Any, NoReturn
 
 from rich.console import Console, Group
 from rich.panel import Panel
@@ -25,15 +27,143 @@ from rich.text import Text
 
 from converter import convert
 from model import (
+    ArchiveLimitError,
     ArchiveLimits,
     ConversionCancelledError,
     ConversionError,
     ConversionObserver,
     ConversionOptions,
     ConversionResult,
+    OutputError,
+    OutputValidationError,
 )
 
 console = Console(stderr=True)
+
+
+def tool_version() -> str:
+    """Report installed package metadata while allowing checkout execution."""
+    try:
+        return version("epub-to-html")
+    except PackageNotFoundError:
+        return "1.0.0"
+
+
+ALL_OPTIONS = (
+    "--help",
+    "--version",
+    "--print-completion",
+    "--output",
+    "--strategy",
+    "--wrap",
+    "--css",
+    "--remove-toc",
+    "--remove-cover",
+    "--images-dir-name",
+    "--chunked",
+    "--safe-mode",
+    "--navigation",
+    "--reader-max-width",
+    "--reader-font-family",
+    "--force",
+    "--deadline-seconds",
+    "--fail-on-warning",
+    "--no-validate-output",
+    "--stable-mime-types",
+    "--newline",
+    "--report-json",
+    "--no-progress",
+    "--force-progress",
+    "--verbose",
+    "--max-archive-entries",
+    "--max-compressed-bytes",
+    "--max-expanded-bytes",
+    "--max-entry-bytes",
+    "--max-compression-ratio",
+    "--max-documents",
+    "--max-images",
+    "--max-output-bytes",
+)
+SHORT_OPTIONS = ("-h", "-o", "-s", "-w", "-c")
+_COMPLETION_WORDS = " ".join((*ALL_OPTIONS, *SHORT_OPTIONS))
+
+COMPLETIONS = {
+    "bash": f'''_epub_to_html_complete() {{
+    local current="${{COMP_WORDS[COMP_CWORD]}}"
+    local previous="${{COMP_WORDS[COMP_CWORD-1]}}"
+    case "$previous" in
+        --strategy) COMPREPLY=($(compgen -W "embed extract" -- "$current")); return ;;
+        --newline) COMPREPLY=($(compgen -W "lf crlf" -- "$current")); return ;;
+        --print-completion) COMPREPLY=($(compgen -W "bash zsh fish powershell" -- "$current")); return ;;
+        --output|--css|--report-json|--images-dir-name|--reader-max-width|--reader-font-family|--deadline-seconds|--max-*) return ;;
+    esac
+    COMPREPLY=($(compgen -W "{_COMPLETION_WORDS}" -- "$current"))
+}}
+complete -F _epub_to_html_complete epub-to-html''',
+    "zsh": """#compdef epub-to-html
+_arguments \\
+    '1:EPUB file:_files -g "*.epub"' \\
+    '(-h --help)'{-h,--help}'[Show help and exit]' \\
+    '(-s --strategy)'{-s,--strategy}'[Image strategy]:strategy:(embed extract)' \\
+    '(-w --wrap)'{-w,--wrap}'[Wrap output]' \\
+    '(-c --css)'{-c,--css}'[Trusted stylesheet]:file:_files' \\
+    '--help[Show help and exit]' '--version[Show version and exit]' \\
+    '--print-completion[Print completion script]:shell:(bash zsh fish powershell)' \\
+    '(-o --output)-o[Output HTML path]:path:_files' \\
+    '--output[Output HTML path]:path:_files' \\
+    '--strategy[Image strategy]:strategy:(embed extract)' '--wrap[Wrap output]' \\
+    '--css[Trusted stylesheet]:file:_files' '--remove-toc[Remove TOC]' '--remove-cover[Remove cover]' \\
+    '--images-dir-name[Extracted image directory]:name:' '--chunked[Stream staged output]' \\
+    '--safe-mode[Sanitize active content]' '--navigation[Add generated navigation]' \\
+    '--reader-max-width[Wrapped reading width]:width:' '--reader-font-family[Wrapped font]:font:' \\
+    '--force[Replace existing output]' '--deadline-seconds[Conversion deadline]:seconds:' \\
+    '--fail-on-warning[Reject warnings]' '--no-validate-output[Skip output validation]' \\
+    '--stable-mime-types[Use stable MIME types]' '--newline[Output line ending]:line ending:(lf crlf)' \\
+    '--report-json[Write JSON report]:file:_files' '--no-progress[Disable progress]' \\
+    '--force-progress[Show progress without TTY]' '--verbose[Show traceback]' \\
+    '--max-archive-entries[Maximum ZIP members]:number:' '--max-compressed-bytes[Maximum compressed bytes]:number:' \\
+    '--max-expanded-bytes[Maximum expanded bytes]:number:' '--max-entry-bytes[Maximum member bytes]:number:' \\
+    '--max-compression-ratio[Maximum compression ratio]:number:' '--max-documents[Maximum documents]:number:' \\
+    '--max-images[Maximum images]:number:' '--max-output-bytes[Maximum output bytes]:number:' """,
+    "fish": "\n".join(
+        [
+            "complete -c epub-to-html -f -a '*.epub'",
+            *[f"complete -c epub-to-html -l {option[2:]}" for option in ALL_OPTIONS],
+            "complete -c epub-to-html -s h -d 'Show help and exit'",
+            "complete -c epub-to-html -s o -r -d 'Output HTML path'",
+            "complete -c epub-to-html -s s -xa 'embed extract' -d 'Image strategy'",
+            "complete -c epub-to-html -s w -d 'Wrap output'",
+            "complete -c epub-to-html -s c -r -d 'Trusted stylesheet'",
+            "complete -c epub-to-html -l strategy -xa 'embed extract'",
+            "complete -c epub-to-html -l newline -xa 'lf crlf'",
+            "complete -c epub-to-html -l print-completion -xa 'bash zsh fish powershell'",
+        ]
+    ),
+    "powershell": f"""Register-ArgumentCompleter -CommandName epub-to-html -ScriptBlock {{
+    param($wordToComplete, $commandAst, $cursorPosition)
+    $options = @({", ".join(repr(option) for option in (*ALL_OPTIONS, *SHORT_OPTIONS))})
+    $values = @{{ '--strategy' = @('embed', 'extract'); '--newline' = @('lf', 'crlf'); '--print-completion' = @('bash', 'zsh', 'fish', 'powershell') }}
+    $previous = $commandAst.CommandElements[$commandAst.CommandElements.Count - 2].Value
+    if ($values.ContainsKey($previous)) {{ $options = $values[$previous] }}
+    $options | Where-Object {{ $_ -like "$wordToComplete*" }} | ForEach-Object {{ [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterName', $_) }}
+}}""",
+}
+
+
+class PrintCompletionAction(argparse.Action):
+    """Print a small static completion script before positional validation runs."""
+
+    def __call__(
+        self,
+        parser_: argparse.ArgumentParser,
+        _namespace: argparse.Namespace,
+        value: str | Sequence[Any] | None,
+        _option_string: str | None = None,
+    ) -> None:
+        del _namespace, _option_string
+        if isinstance(value, str):
+            parser_.exit(message=COMPLETIONS[value] + "\n")
+        parser_.error("--print-completion requires a shell name")
 
 
 class RichArgumentParser(argparse.ArgumentParser):
@@ -91,72 +221,133 @@ class RichProgressObserver(ConversionObserver):
 def parser() -> argparse.ArgumentParser:
     """Build the command-line interface."""
     result = RichArgumentParser(description="Convert an EPUB publication into one HTML document.")
-    result.add_argument("epub_path", type=Path, help="Path to the input EPUB file")
+    result.add_argument("--version", action="version", version=f"%(prog)s {tool_version()}")
     result.add_argument(
+        "--print-completion", choices=tuple(COMPLETIONS), action=PrintCompletionAction
+    )
+    input_output = result.add_argument_group("Input and output")
+    content = result.add_argument_group("Content and presentation")
+    safety = result.add_argument_group("Safety and reliability")
+    diagnostics = result.add_argument_group("Diagnostics and automation")
+    input_output.add_argument("epub_path", type=Path, help="Path to the input EPUB file")
+    input_output.add_argument(
         "-o", "--output", type=Path, default=Path("output.html"), help="Output HTML path"
     )
-    result.add_argument(
+    input_output.add_argument(
         "-s",
         "--strategy",
         choices=("embed", "extract"),
         default="embed",
-        help="Image output strategy",
+        help="Image output strategy; default: embed",
     )
-    result.add_argument(
+    content.add_argument(
         "-w", "--wrap", action="store_true", help="Wrap content in a complete HTML document"
     )
-    result.add_argument("-c", "--css", type=Path, help="Inline a CSS file and enable --wrap")
-    result.add_argument(
+    content.add_argument(
+        "-c", "--css", type=Path, help="Inline a trusted local stylesheet and enable --wrap"
+    )
+    content.add_argument(
         "--remove-toc", action="store_true", help="Remove table-of-contents elements"
     )
-    result.add_argument("--remove-cover", action="store_true", help="Remove cover elements")
-    result.add_argument(
+    content.add_argument("--remove-cover", action="store_true", help="Remove cover elements")
+    content.add_argument(
         "--images-dir-name", default="{stem}_files", help="Extracted-image directory name"
     )
-    result.add_argument(
+    content.add_argument(
         "--chunked", action="store_true", help="Stream prepared documents to staged output"
     )
-    result.add_argument(
+    content.add_argument(
         "--safe-mode", action="store_true", help="Sanitize active markup and unsafe URLs"
     )
-    result.add_argument("--force", action="store_true", help="Replace existing output")
-    result.add_argument(
+    content.add_argument(
+        "--navigation",
+        action="store_true",
+        help="Add an opt-in table of contents and back-to-top links",
+    )
+    content.add_argument(
+        "--reader-max-width",
+        help="Set reading width and automatically enable wrapping; default: 72ch",
+    )
+    content.add_argument(
+        "--reader-font-family",
+        help="Set reading font and automatically enable wrapping; default: Georgia, serif",
+    )
+    safety.add_argument("--force", action="store_true", help="Replace existing output")
+    safety.add_argument(
         "--deadline-seconds", type=float, help="Cancel after this conversion deadline"
     )
-    result.add_argument(
+    safety.add_argument(
         "--fail-on-warning", action="store_true", help="Do not publish output if warnings occur"
     )
-    result.add_argument(
+    safety.add_argument(
         "--no-validate-output", action="store_true", help="Skip staged HTML integrity checks"
     )
-    result.add_argument(
+    safety.add_argument(
         "--stable-mime-types",
         action="store_true",
         help="Use extension-based MIME types instead of host-dependent guessing",
     )
-    result.add_argument(
-        "--newline", choices=("lf", "crlf"), default="lf", help="Output line ending"
+    safety.add_argument(
+        "--newline", choices=("lf", "crlf"), default="lf", help="Output line ending; default: lf"
     )
-    result.add_argument(
+    diagnostics.add_argument(
         "--report-json", type=Path, help="Write a machine-readable local conversion report"
     )
-    result.add_argument("--no-progress", action="store_true", help="Disable progress bars")
-    result.add_argument(
+    diagnostics.add_argument("--no-progress", action="store_true", help="Disable progress bars")
+    diagnostics.add_argument(
         "--force-progress", action="store_true", help="Show progress bars without a TTY"
     )
-    result.add_argument("--verbose", action="store_true", help="Show unexpected error tracebacks")
-    result.add_argument("--max-archive-entries", type=int, default=ArchiveLimits.max_entries)
-    result.add_argument(
-        "--max-compressed-bytes", type=int, default=ArchiveLimits.max_compressed_bytes
+    diagnostics.add_argument(
+        "--verbose", action="store_true", help="Show unexpected error tracebacks"
     )
-    result.add_argument("--max-expanded-bytes", type=int, default=ArchiveLimits.max_expanded_bytes)
-    result.add_argument("--max-entry-bytes", type=int, default=ArchiveLimits.max_entry_bytes)
-    result.add_argument(
-        "--max-compression-ratio", type=float, default=ArchiveLimits.max_compression_ratio
+    safety.add_argument(
+        "--max-archive-entries",
+        type=int,
+        default=ArchiveLimits.max_entries,
+        help="Maximum ZIP members; default: 10000",
     )
-    result.add_argument("--max-documents", type=int, default=ArchiveLimits.max_documents)
-    result.add_argument("--max-images", type=int, default=ArchiveLimits.max_images)
-    result.add_argument("--max-output-bytes", type=int, default=ArchiveLimits.max_output_bytes)
+    safety.add_argument(
+        "--max-compressed-bytes",
+        type=int,
+        default=ArchiveLimits.max_compressed_bytes,
+        help="Maximum compressed archive bytes; default: 268435456",
+    )
+    safety.add_argument(
+        "--max-expanded-bytes",
+        type=int,
+        default=ArchiveLimits.max_expanded_bytes,
+        help="Maximum expanded archive bytes; default: 1073741824",
+    )
+    safety.add_argument(
+        "--max-entry-bytes",
+        type=int,
+        default=ArchiveLimits.max_entry_bytes,
+        help="Maximum expanded member bytes; default: 104857600",
+    )
+    safety.add_argument(
+        "--max-compression-ratio",
+        type=float,
+        default=ArchiveLimits.max_compression_ratio,
+        help="Maximum ZIP compression ratio; default: 1000",
+    )
+    safety.add_argument(
+        "--max-documents",
+        type=int,
+        default=ArchiveLimits.max_documents,
+        help="Maximum document items; default: 5000",
+    )
+    safety.add_argument(
+        "--max-images",
+        type=int,
+        default=ArchiveLimits.max_images,
+        help="Maximum image items; default: 10000",
+    )
+    safety.add_argument(
+        "--max-output-bytes",
+        type=int,
+        default=ArchiveLimits.max_output_bytes,
+        help="Maximum generated bytes; default: 1073741824",
+    )
     return result
 
 
@@ -173,24 +364,32 @@ def _options(args: argparse.Namespace) -> ConversionOptions:
         args.max_output_bytes,
     )
     return ConversionOptions(
-        args.epub_path,
-        args.output.resolve(),
-        args.strategy,
-        args.wrap or bool(css),
-        css,
-        args.remove_toc,
-        args.remove_cover,
-        args.images_dir_name,
-        args.chunked,
-        args.safe_mode,
-        args.force,
-        limits,
-        args.deadline_seconds,
-        None,
-        args.fail_on_warning,
-        not args.no_validate_output,
-        args.stable_mime_types,
-        args.newline,
+        input_path=args.epub_path,
+        output_path=args.output.resolve(),
+        image_strategy=args.strategy,
+        wrap_html=(
+            args.wrap
+            or bool(css)
+            or args.navigation
+            or args.reader_max_width is not None
+            or args.reader_font_family is not None
+        ),
+        css=css,
+        remove_toc=args.remove_toc,
+        remove_cover=args.remove_cover,
+        images_dir_name=args.images_dir_name,
+        chunked=args.chunked,
+        safe_html=args.safe_mode,
+        force=args.force,
+        archive_limits=limits,
+        deadline_seconds=args.deadline_seconds,
+        fail_on_warning=args.fail_on_warning,
+        validate_output=not args.no_validate_output,
+        stable_mime_types=args.stable_mime_types,
+        newline=args.newline,
+        navigation=args.navigation,
+        reader_max_width=args.reader_max_width or "72ch",
+        reader_font_family=args.reader_font_family or "Georgia, serif",
     )
 
 
@@ -233,12 +432,14 @@ def _print_result(result: ConversionResult) -> None:
         console.print(f"[yellow]… and {len(result.warnings) - 10} more warning(s).[/]")
 
 
-def _write_report(path: Path, result: ConversionResult) -> None:
+def write_report(path: Path, result: ConversionResult, options: ConversionOptions) -> None:
     """Write a local JSON report for automation; no telemetry is sent."""
     path.write_text(
         json.dumps(
             {
                 "status": "success",
+                "tool_version": tool_version(),
+                "input_path": str(options.input_path),
                 "output_path": str(result.output_path),
                 "images_path": str(result.images_path) if result.images_path else None,
                 "documents_processed": result.documents_processed,
@@ -250,6 +451,14 @@ def _write_report(path: Path, result: ConversionResult) -> None:
                 "input_bytes": result.input_bytes,
                 "output_bytes": result.output_bytes,
                 "warnings": [warning.__dict__ for warning in result.warnings],
+                "policy": {
+                    "image_strategy": options.image_strategy,
+                    "safe_mode": result.safe_html,
+                    "chunked": result.chunked,
+                    "navigation": options.navigation,
+                    "validate_output": options.validate_output,
+                    "newline": options.newline,
+                },
             },
             indent=2,
         )
@@ -277,7 +486,15 @@ def main() -> None:
         raise SystemExit(130) from None
     except (ConversionError, OSError, ValueError) as error:
         console.print(Panel(str(error), title="[bold red]Conversion failed[/]", border_style="red"))
-        raise SystemExit(130 if isinstance(error, ConversionCancelledError) else 1) from error
+        if isinstance(error, ConversionCancelledError):
+            exit_code = 130
+        elif isinstance(error, (ArchiveLimitError, OutputValidationError)):
+            exit_code = 4
+        elif isinstance(error, (OutputError, OSError)):
+            exit_code = 5
+        else:
+            exit_code = 1
+        raise SystemExit(exit_code) from error
     except Exception:
         if args.verbose:
             console.print_exception()
@@ -292,7 +509,11 @@ def main() -> None:
         raise SystemExit(3) from None
     _print_result(result)
     if args.report_json:
-        _write_report(args.report_json, result)
+        try:
+            write_report(args.report_json, result, options)
+        except OSError as error:
+            console.print(Panel(str(error), title="[bold red]Report failed[/]", border_style="red"))
+            raise SystemExit(5) from error
 
 
 if __name__ == "__main__":

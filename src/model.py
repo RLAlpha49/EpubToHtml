@@ -96,6 +96,9 @@ class ConversionOptions:
     validate_output: bool = True
     stable_mime_types: bool = False
     newline: Literal["lf", "crlf"] = "lf"
+    navigation: bool = False
+    reader_max_width: str = "72ch"
+    reader_font_family: str = "Georgia, serif"
 
     def validate(self) -> None:
         self.archive_limits.validate()
@@ -118,6 +121,8 @@ class ConversionOptions:
             raise ValueError("deadline_seconds must be greater than zero")
         if self.newline not in {"lf", "crlf"}:
             raise ValueError("newline must be 'lf' or 'crlf'")
+        if not self.reader_max_width.strip() or not self.reader_font_family.strip():
+            raise ValueError("reader presentation values cannot be empty")
 
 
 @dataclass(frozen=True)

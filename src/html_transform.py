@@ -219,9 +219,64 @@ def prepare_document(
 
 
 def wrap_html(content: str, title: str | None, css: str | None) -> str:
-    """Create a standalone shell while escaping metadata at serialization."""
+    """Create a standalone shell while retaining the legacy helper contract."""
+    return wrap_document(content, title, css, "en", False, "72ch", "Georgia, serif")
+
+
+def wrap_document(
+    content: str,
+    title: str | None,
+    css: str | None,
+    language: str,
+    navigation: bool,
+    max_width: str,
+    font_family: str,
+) -> str:
+    """Wrap merged content in an accessible reading shell with opt-in navigation."""
     styles = (
         css
-        or "body { font-family: Georgia, serif; line-height: 1.6; max-width: 900px; margin: 0 auto; padding: 20px; } img { max-width: 100%; height: auto; }"
+        or f"""
+:root {{ color-scheme: light dark; }}
+body {{ font-family: {font_family}; line-height: 1.6; max-width: {max_width}; margin: 0 auto; padding: clamp(1rem, 4vw, 2rem); }}
+img {{ max-width: 100%; height: auto; }}
+a:focus-visible {{ outline: 3px solid currentColor; outline-offset: 3px; }}
+.skip-link {{ left: 1rem; position: absolute; top: -5rem; }}
+.skip-link:focus {{ top: 1rem; }}
+.document-navigation {{ border-block-end: 1px solid currentColor; margin-block-end: 2rem; padding-block-end: 1rem; }}
+.back-to-top {{ display: block; margin-block: 2rem; }}
+@media (prefers-reduced-motion: reduce) {{ *, *::before, *::after {{ scroll-behavior: auto !important; transition-duration: 0.01ms !important; }} }}
+@media print {{ body {{ max-width: none; padding: 0; }} .skip-link, .document-navigation, .back-to-top {{ display: none; }} a {{ color: inherit; text-decoration: none; }} }}
+"""
     )
-    return f'<!DOCTYPE html>\n<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>{html.escape(title or "EPUB Document", quote=True)}</title><style>{styles}</style></head><body>{content}</body></html>\n'
+    navigation_markup = ""
+    if navigation:
+        soup = BeautifulSoup(content, "html.parser")
+        entries: list[str] = []
+        for number, section in enumerate(soup.find_all("section", recursive=False), start=1):
+            section_id = section.get("id")
+            if not section_id:
+                continue
+            heading = section.find(re.compile(r"^h[1-6]$"))
+            label = heading.get_text(" ", strip=True) if heading else f"Chapter {number}"
+            entries.append(
+                f'<li><a href="#{html.escape(str(section_id), quote=True)}">'
+                f"{html.escape(label)}</a></li>"
+            )
+            section.append(
+                BeautifulSoup('<a class="back-to-top" href="#top">Back to top</a>', "html.parser")
+            )
+        content = str(soup)
+        if entries:
+            navigation_markup = (
+                '<nav class="document-navigation" aria-label="Table of contents"><h2>Contents</h2><ol>'
+                + "".join(entries)
+                + "</ol></nav>"
+            )
+    safe_language = language if re.fullmatch(r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*", language) else "en"
+    return (
+        f'<!DOCTYPE html>\n<html lang="{html.escape(safe_language, quote=True)}"><head>'
+        '<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">'
+        f"<title>{html.escape(title or 'EPUB Document', quote=True)}</title><style>{styles}</style>"
+        f'</head><body id="top"><a class="skip-link" href="#main-content">Skip to content</a>{navigation_markup}'
+        f'<main id="main-content" tabindex="-1">{content}</main></body></html>\n'
+    )

@@ -1,6 +1,13 @@
 from bs4 import BeautifulSoup
 
-from html_transform import DocumentTarget, build_targets, prepare_document, sanitize, wrap_html
+from html_transform import (
+    DocumentTarget,
+    build_targets,
+    prepare_document,
+    sanitize,
+    wrap_document,
+    wrap_html,
+)
 from images import ImageIndex
 
 
@@ -53,6 +60,24 @@ def test_wrapped_title_is_escaped() -> None:
 
     assert "&lt;/title&gt;" in html
     assert "<title></title>" not in html
+
+
+def test_wrapped_document_uses_metadata_language_and_opt_in_navigation() -> None:
+    html = wrap_document(
+        '<section id="chapter"><h1>Opening</h1><p>Text</p></section>',
+        "Book",
+        None,
+        "fr-CA",
+        True,
+        "70ch",
+        "serif",
+    )
+
+    assert '<html lang="fr-CA">' in html
+    assert 'href="#main-content">Skip to content' in html
+    assert 'aria-label="Table of contents"' in html
+    assert 'href="#chapter">Opening' in html
+    assert 'class="back-to-top"' in html
 
 
 def test_queries_are_preserved_while_local_fragments_are_rewritten() -> None:
