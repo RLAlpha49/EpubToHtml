@@ -113,15 +113,20 @@ EPUB; `-h/--help` prints this reference.
 | --- | --- | --- |
 | `epub_path` | Input EPUB file. | `python main.py "book.epub"` |
 | `-h`, `--help` | Show help and exit. | `python main.py --help` |
+| `--version` | Show the installed tool version and exit. | `epub-to-html --version` |
+| `--print-completion {bash,zsh,fish,powershell}` | Print a complete shell-completion script and exit; it does not modify shell configuration automatically. | `epub-to-html --print-completion powershell` |
 | `-o`, `--output PATH` | Output HTML path; defaults to `output.html`. | `python main.py book.epub --output converted.html` |
 | `-s`, `--strategy {embed,extract}` | Embed images as data URLs or extract them beside the HTML; defaults to `embed`. | `python main.py book.epub --strategy extract` |
-| `-w`, `--wrap` | Add a complete HTML document shell and default styling. | `python main.py book.epub --wrap` |
-| `-c`, `--css PATH` | Inline a trusted local stylesheet; also enables wrapping. | `python main.py book.epub --css styles.css` |
+| `-w`, `--wrap` | Add a complete HTML document shell and default styling. It is optional when using any option that needs wrapped output. | `python main.py book.epub --wrap` |
+| `-c`, `--css PATH` | Inline a trusted local stylesheet; automatically enables wrapping. | `python main.py book.epub --css styles.css` |
 | `--remove-toc` | Remove detected table-of-contents elements. | `python main.py book.epub --remove-toc` |
 | `--remove-cover` | Remove detected cover elements. | `python main.py book.epub --remove-cover` |
 | `--images-dir-name NAME` | Extracted image directory basename; `{stem}` expands to the output filename stem. | `python main.py book.epub --strategy extract --images-dir-name assets` |
-| `--chunked` | Write prepared documents incrementally to staging. | `python main.py book.epub --chunked` |
+| `--chunked` | Write prepared documents incrementally to staging; navigation requires collecting the generated sections first. | `python main.py book.epub --chunked` |
 | `--safe-mode` | Remove active markup, unsafe URLs, EPUB CSS, SVG, and invalid raster images. | `python main.py book.epub --safe-mode --wrap` |
+| `--navigation` | Add an automatically generated table of contents and back-to-top links; automatically enables wrapping. | `python main.py book.epub --navigation` |
+| `--reader-max-width CSS_VALUE` | Set wrapped reading width and automatically enable wrapping; defaults to `72ch` when wrapping is enabled. | `python main.py book.epub --reader-max-width 65ch` |
+| `--reader-font-family CSS_VALUE` | Set wrapped reading font and automatically enable wrapping; defaults to `Georgia, serif` when wrapping is enabled. | `python main.py book.epub --reader-font-family system-ui` |
 | `--force` | Replace existing HTML and extracted-image output. | `python main.py book.epub --force` |
 | `--deadline-seconds N` | Cancel conversion after the cooperative deadline. | `python main.py book.epub --deadline-seconds 30` |
 | `--fail-on-warning` | Abort without publishing if conversion warnings occur. | `python main.py book.epub --fail-on-warning` |
@@ -152,6 +157,99 @@ python main.py "unknown-source.epub" --safe-mode --wrap -o "output.html"
 
 Safe mode strips browser-active markup and unsafe resource URLs. It is a content
 filter, not a complete sandbox.
+
+### Shell completion
+
+Completion output is intentionally printed rather than silently editing a shell
+profile. Each generated script covers every CLI option, choice value,
+and the EPUB positional file. Install it once using the command appropriate for
+your shell, then completion is automatic in future sessions:
+
+- **PowerShell:** `epub-to-html --print-completion powershell | Out-File $PROFILE\u005cepub-to-html.ps1 -Encoding utf8`, then add `. $PROFILE\u005cepub-to-html.ps1` to your profile.
+- **Bash:** `epub-to-html --print-completion bash > ~/.local/share/bash-completion/completions/epub-to-html`, then start a new shell.
+- **Zsh:** `epub-to-html --print-completion zsh > ~/.zfunc/_epub-to-html`, and add that directory to `fpath`.
+- **Fish:** `epub-to-html --print-completion fish > ~/.config/fish/completions/epub-to-html.fish`.
+
+The converter itself does not need a completion script to run; this is only shell
+help for typing commands.
+
+## Output behavior and limitations
+
+The converter reads EPUB document items in spine order when the EPUB supplies a
+spine; otherwise it uses the document order provided by the publication. It gives
+each merged section and source ID a deterministic unique anchor, then rewrites
+resolvable local document links to those anchors. Links with query strings,
+external URLs, root-relative URLs, and unresolved paths remain unchanged so the
+conversion does not silently invent a destination.
+
+Image references are resolved against their EPUB-relative paths. Ambiguous image
+basenames are deliberately not guessed and produce a warning. UTF-8 is preferred
+for chapter text; when it fails, the converter samples up to 64 KiB for encoding
+detection and records a `decode-fallback` warning.
+
+This tool targets reflowable, HTML-based EPUB content. Fixed-layout publications,
+complex CSS layouts, JavaScript-driven books, audio/video, fonts, SVG, MathML,
+form controls, and non-image assets are not faithfully preserved. Safe mode
+intentionally removes SVG, MathML, CSS, active elements, and unsafe URLs. For
+trusted EPUBs, normal mode preserves more source markup but does not guarantee
+that the source will render identically outside its original reader.
+
+### Portability and file size
+
+`--strategy embed` is the default. It produces one self-contained HTML file that
+is easy to move or share, but base64-encoded images can make it substantially
+larger. `--strategy extract` keeps the HTML smaller by writing an image directory
+beside it. Keep that directory and the HTML together when moving, copying, or
+publishing the result; the generated references are relative paths.
+
+### Limits and conversion warnings
+
+Before parsing, the converter rejects archives that exceed its entry, compressed
+size, expanded size, member size, compression ratio, document, image, or output
+size limits. The defaults are listed in `--help` and can be made stricter or
+looser with the corresponding `--max-*` options. A deadline can be supplied with
+`--deadline-seconds`; output is staged and published only after conversion checks
+complete.
+
+Warnings cover skipped images/documents, ambiguous or unresolved images, and
+encoding fallbacks. Use `--fail-on-warning` to prevent publication when any
+warning occurs, or `--report-json report.json` to save the full warning
+list, paths, counts, sizes, duration, conversion policy, and tool version for automation.
+
+### Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Conversion completed successfully. |
+| `1` | Invalid input or another expected conversion failure. |
+| `2` | Invalid command-line usage (reported by `argparse`). |
+| `3` | Unexpected internal failure; use `--verbose` for a traceback. |
+| `4` | Policy or staged-output validation rejection, including archive limits. |
+| `5` | Output or report write failure. |
+| `130` | Conversion was cancelled or exceeded its deadline. |
+
+## Troubleshooting
+
+| Symptom | What to check |
+| --- | --- |
+| “Input is not a valid ZIP/EPUB” or missing container files | Confirm the path points to a complete EPUB, not a renamed download, and try opening it in a standard EPUB reader. |
+| Images are missing | Review conversion warnings. Verify that the EPUB manifest contains the image and that its relative path is unambiguous. For extracted output, keep the generated asset directory with the HTML. |
+| A local link does not work | Only resolvable, query-free EPUB-local links are rewritten. Check the warning report and whether the target source document or fragment exists. |
+| Garbled characters | Look for a `decode-fallback` warning. The source may declare or contain an incorrect encoding |
+| HTML is unexpectedly large | Use `--strategy extract`, remove unneeded cover/TOC content, or inspect large images in the source EPUB. Embedded images make the single output portable at the cost of size. |
+| “Output already exists” or access denied | Pick a new path or use `--force` only when replacement is intended. Ensure the output directory is writable. |
+| Windows path or filename error | Use a valid filename and a safe `--images-dir-name` basename; avoid `..`, separators, and device names such as `CON` or `LPT1`. |
+| File is locked by antivirus, sync, or another application | Close browser/editor windows holding the output, pause the interfering process if appropriate, and retry in a local writable directory. |
+
+## Testing and contributing
+
+The project uses Nox for repeatable development commands. After installing the
+development extras, run `python -m nox` to format, lint, type-check, test, and
+build the project. To run one activity, use `python -m nox -- tests`,
+`python -m nox -- lint`, or another task listed in [CONTRIBUTING.md](CONTRIBUTING.md).
+The test suite covers archive policy, conversion transforms, image handling,
+output staging, and CLI behavior. Contributions should include a focused regression
+test when they change observable conversion behavior.
 
 ## License
 
