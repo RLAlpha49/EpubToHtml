@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import stat
 import zipfile
+from collections.abc import Iterator
 from html import escape
 from pathlib import Path
 from time import monotonic
@@ -13,6 +14,7 @@ from bs4 import BeautifulSoup
 from ebooklib import epub
 
 from html_transform import (
+    DocumentTarget,
     build_targets,
     decode_document,
     prepare_document,
@@ -65,8 +67,8 @@ def preflight_archive(path: Path, options: ConversionOptions) -> None:
                     raise ArchiveLimitError(
                         f"Archive member exceeds entry limit: {entry.filename!r}"
                     )
-                if entry.compress_size == 0 < entry.file_size or (
-                    entry.compress_size
+                if (entry.compress_size == 0 and entry.file_size > 0) or (
+                    entry.compress_size > 0
                     and entry.file_size / entry.compress_size > limits.max_compression_ratio
                 ):
                     raise ArchiveLimitError(
@@ -165,6 +167,186 @@ def _validate_staged_html(path: Path) -> None:
             raise OutputValidationError(f"Generated output has unresolved local resource: {source}")
 
 
+def _process_images(
+    images: list[epub.EpubItem],
+    resources: list[epub.EpubItem],
+    options: ConversionOptions,
+    staged: StagedOutput,
+    index: ImageIndex,
+    started_at: float,
+    diagnostics: WarningCollector,
+    observer: ConversionObserver | None,
+) -> tuple[int, int]:
+    """Register images and extractable resources, returning (processed, skipped)."""
+    strategy: ImageOutput
+    if staged.images_path:
+        strategy = ExtractedImageOutput(staged.images_path, options.safe_html)
+    else:
+        strategy = EmbeddedImageOutput(options.safe_html, options.stable_mime_types)
+    processed_images = skipped = 0
+    if observer:
+        observer.phase("Processing images", len(images), "img")
+    for image in images:
+        _check_cancelled(options, started_at)
+        try:
+            index.add(strategy.register(image))
+            processed_images += 1
+        except (OSError, ValueError) as error:
+            skipped += 1
+            diagnostics.add("skipped-image", str(error), image.get_name())
+        finally:
+            if observer:
+                observer.advance()
+    if options.image_strategy == "extract":
+        for resource in resources:
+            media_type = str(resource.media_type or "")
+            policy = options.font_policy if "font" in media_type else options.media_policy
+            if policy == "extract":
+                try:
+                    index.add(strategy.register(resource))
+                except (OSError, ValueError) as error:
+                    diagnostics.add("skipped-resource", str(error), resource.get_name())
+            elif policy == "preserve":
+                diagnostics.add(
+                    "preserved-resource-reference",
+                    "Resource reference was retained; use extract mode to copy it beside HTML.",
+                    resource.get_name(),
+                )
+            else:
+                diagnostics.add(
+                    "omitted-resource", "Resource omitted by policy.", resource.get_name()
+                )
+    return processed_images, skipped
+
+
+def _process_stylesheets(
+    stylesheets: list[epub.EpubItem],
+    options: ConversionOptions,
+    index: ImageIndex,
+    diagnostics: WarningCollector,
+) -> str:
+    """Rewrite and inline internal stylesheets, returning the merged CSS."""
+    if not (options.preserve_internal_css and not options.safe_html):
+        return ""
+    css_parts: list[str] = []
+    for stylesheet in stylesheets:
+        try:
+            css_parts.append(
+                rewrite_css_urls(
+                    stylesheet.get_content().decode("utf-8"), stylesheet.get_name(), index
+                )
+            )
+        except UnicodeDecodeError:
+            diagnostics.add(
+                "skipped-stylesheet", "Stylesheet is not UTF-8.", stylesheet.get_name()
+            )
+    return "\n".join(css_parts)
+
+
+def _decode_documents(
+    documents: list[epub.EpubItem],
+    options: ConversionOptions,
+    started_at: float,
+    diagnostics: WarningCollector,
+    observer: ConversionObserver | None,
+) -> tuple[list[tuple[epub.EpubItem, str]], int]:
+    """Decode documents and return (decoded_pairs, skipped_count)."""
+    decoded: list[tuple[epub.EpubItem, str]] = []
+    skipped_documents = 0
+    if observer:
+        observer.phase("Decoding documents", len(documents), "doc")
+    for document in documents:
+        _check_cancelled(options, started_at)
+        try:
+            content, warning = decode_document(document)
+            decoded.append((document, content))
+            if warning:
+                diagnostics.add(warning.code, warning.message, warning.location)
+        except (OSError, ValueError) as error:
+            skipped_documents += 1
+            diagnostics.add("skipped-document", str(error), document.get_name())
+        if observer:
+            observer.advance()
+    return decoded, skipped_documents
+
+
+def _prepare_sections(
+    decoded: list[tuple[epub.EpubItem, str]],
+    targets: dict[str, DocumentTarget],
+    index: ImageIndex,
+    options: ConversionOptions,
+    started_at: float,
+    diagnostics: WarningCollector,
+    observer: ConversionObserver | None,
+) -> Iterator[str]:
+    """Yield prepared HTML sections from decoded documents."""
+    if observer:
+        observer.phase("Extracting content", len(decoded), "doc")
+    for document, content in decoded:
+        _check_cancelled(options, started_at)
+        section, warnings = prepare_document(
+            document,
+            content,
+            targets,
+            index,
+            options.remove_toc,
+            options.remove_cover,
+            options.safe_html,
+            options.exclude_content,
+            options.svg_policy,
+            options.mathml_policy,
+        )
+        for warning in warnings:
+            diagnostics.add(warning.code, warning.message, warning.location)
+        if observer:
+            observer.advance()
+        yield section
+
+
+def _write_output(
+    sections: Iterator[str],
+    staged: StagedOutput,
+    options: ConversionOptions,
+    book: epub.EpubBook,
+    internal_css: str,
+) -> None:
+    """Write sections to staged output according to output options."""
+    with staged.open_html("\r\n" if options.newline == "crlf" else "\n") as output:
+        if options.wrap_html and options.chunked and not options.navigation:
+            styles = (
+                "\n".join(value for value in (options.css, internal_css) if value)
+                or f"body {{ font-family: {options.reader_font_family}; line-height: 1.6; max-width: {options.reader_max_width}; margin: 0 auto; padding: clamp(1rem, 4vw, 2rem); }} img {{ max-width: 100%; height: auto; }}"
+            )
+            output.write(
+                f'<!DOCTYPE html>\n<html lang="{escape(_language(book), quote=True)}">'
+                f"<head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">"
+                f"<title>{escape(_title(book) or 'EPUB Document', quote=True)}</title>"
+                f"<style>{styles}</style></head>"
+                f'<body id="top"><a class="skip-link" href="#main-content">Skip to content</a>'
+                f'<main id="main-content" tabindex="-1">'
+            )
+            for section in sections:
+                output.write(section + "\n")
+            output.write("</main></body></html>\n")
+        elif options.wrap_html:
+            output.write(
+                wrap_document(
+                    "\n".join(sections),
+                    _title(book),
+                    "\n".join(value for value in (options.css, internal_css) if value) or None,
+                    _language(book),
+                    options.navigation,
+                    options.reader_max_width,
+                    options.reader_font_family,
+                )
+            )
+        elif options.chunked:
+            for section in sections:
+                output.write(section + "\n")
+        else:
+            output.write("\n".join(sections))
+
+
 def convert(
     options: ConversionOptions, observer: ConversionObserver | None = None
 ) -> ConversionResult:
@@ -202,135 +384,21 @@ def convert(
     )
 
     with StagedOutput(options.output_path, images_name, options.force) as staged:
-        strategy: ImageOutput
-        if staged.images_path:
-            strategy = ExtractedImageOutput(staged.images_path, options.safe_html)
-        else:
-            strategy = EmbeddedImageOutput(options.safe_html, options.stable_mime_types)
         index = ImageIndex()
-        processed_images = skipped = 0
-        if observer:
-            observer.phase("Processing images", len(images), "img")
-        for image in images:
-            _check_cancelled(options, started_at)
-            try:
-                index.add(strategy.register(image))
-                processed_images += 1
-            except (OSError, ValueError) as error:
-                skipped += 1
-                diagnostics.add("skipped-image", str(error), image.get_name())
-            finally:
-                if observer:
-                    observer.advance()
-
-        if options.image_strategy == "extract":
-            for resource in resources:
-                media_type = str(resource.media_type or "")
-                policy = options.font_policy if "font" in media_type else options.media_policy
-                if policy == "extract":
-                    try:
-                        index.add(strategy.register(resource))
-                    except (OSError, ValueError) as error:
-                        diagnostics.add("skipped-resource", str(error), resource.get_name())
-                elif policy == "preserve":
-                    diagnostics.add(
-                        "preserved-resource-reference",
-                        "Resource reference was retained; use extract mode to copy it beside HTML.",
-                        resource.get_name(),
-                    )
-                else:
-                    diagnostics.add(
-                        "omitted-resource", "Resource omitted by policy.", resource.get_name()
-                    )
-
-        internal_css = ""
-        if options.preserve_internal_css and not options.safe_html:
-            css_parts: list[str] = []
-            for stylesheet in stylesheets:
-                try:
-                    css_parts.append(
-                        rewrite_css_urls(
-                            stylesheet.get_content().decode("utf-8"), stylesheet.get_name(), index
-                        )
-                    )
-                except UnicodeDecodeError:
-                    diagnostics.add(
-                        "skipped-stylesheet", "Stylesheet is not UTF-8.", stylesheet.get_name()
-                    )
-            internal_css = "\n".join(css_parts)
-
-        decoded: list[tuple[epub.EpubItem, str]] = []
-        skipped_documents = 0
-        if observer:
-            observer.phase("Decoding documents", len(documents), "doc")
-        for document in documents:
-            _check_cancelled(options, started_at)
-            try:
-                content, warning = decode_document(document)
-                decoded.append((document, content))
-                if warning:
-                    diagnostics.add(warning.code, warning.message, warning.location)
-            except (OSError, ValueError) as error:
-                skipped_documents += 1
-                diagnostics.add("skipped-document", str(error), document.get_name())
-            if observer:
-                observer.advance()
+        processed_images, skipped = _process_images(
+            images, resources, options, staged, index, started_at, diagnostics, observer
+        )
+        internal_css = _process_stylesheets(stylesheets, options, index, diagnostics)
+        decoded, skipped_documents = _decode_documents(
+            documents, options, started_at, diagnostics, observer
+        )
         targets = build_targets(decoded)
-
-        def sections():
-            if observer:
-                observer.phase("Extracting content", len(decoded), "doc")
-            for document, content in decoded:
-                _check_cancelled(options, started_at)
-                section, warnings = prepare_document(
-                    document,
-                    content,
-                    targets,
-                    index,
-                    options.remove_toc,
-                    options.remove_cover,
-                    options.safe_html,
-                    options.exclude_content,
-                    options.svg_policy,
-                    options.mathml_policy,
-                )
-                for warning in warnings:
-                    diagnostics.add(warning.code, warning.message, warning.location)
-                if observer:
-                    observer.advance()
-                yield section
-
+        sections = _prepare_sections(
+            decoded, targets, index, options, started_at, diagnostics, observer
+        )
         if observer:
             observer.phase("Writing output")
-        with staged.open_html("\r\n" if options.newline == "crlf" else "\n") as output:
-            if options.wrap_html and options.chunked and not options.navigation:
-                styles = (
-                    "\n".join(value for value in (options.css, internal_css) if value)
-                    or f"body {{ font-family: {options.reader_font_family}; line-height: 1.6; max-width: {options.reader_max_width}; margin: 0 auto; padding: clamp(1rem, 4vw, 2rem); }} img {{ max-width: 100%; height: auto; }}"
-                )
-                output.write(
-                    f'<!DOCTYPE html>\n<html lang="{escape(_language(book), quote=True)}"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>{escape(_title(book) or "EPUB Document", quote=True)}</title><style>{styles}</style></head><body id="top"><a class="skip-link" href="#main-content">Skip to content</a><main id="main-content" tabindex="-1">'
-                )
-                for section in sections():
-                    output.write(section + "\n")
-                output.write("</main></body></html>\n")
-            elif options.wrap_html:
-                output.write(
-                    wrap_document(
-                        "\n".join(sections()),
-                        _title(book),
-                        "\n".join(value for value in (options.css, internal_css) if value) or None,
-                        _language(book),
-                        options.navigation,
-                        options.reader_max_width,
-                        options.reader_font_family,
-                    )
-                )
-            elif options.chunked:
-                for section in sections():
-                    output.write(section + "\n")
-            else:
-                output.write("\n".join(sections()))
+        _write_output(sections, staged, options, book, internal_css)
         if staged.size() > options.archive_limits.max_output_bytes:
             raise ArchiveLimitError("Generated output exceeds configured output limit.")
         if options.validate_output and staged.html_path:
