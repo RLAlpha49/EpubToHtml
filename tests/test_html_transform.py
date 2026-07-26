@@ -4,11 +4,12 @@ from html_transform import (
     DocumentTarget,
     build_targets,
     prepare_document,
+    rewrite_images,
     sanitize,
     wrap_document,
     wrap_html,
 )
-from images import ImageIndex
+from images import ImageIndex, ImageReference
 
 
 class Item:
@@ -105,3 +106,34 @@ def test_targets_add_stable_hashes_for_unicode_slug_collisions() -> None:
     assert target == second["text/Å.xhtml"]
     assert target.anchor.startswith("epub-text-xhtml-")
     assert target.ids["Å"].startswith(f"{target.anchor}--item-")
+
+
+def test_rewrite_images_rewrites_srcset_descriptors() -> None:
+    index = ImageIndex()
+    index.add(ImageReference("images/test.png", "data:image/png;base64,AA=="))
+    soup = BeautifulSoup(
+        '<img src="images/test.png" srcset="images/test.png 1x, images/test.png 2x">',
+        "html.parser",
+    )
+
+    warnings = rewrite_images(soup, "text/chapter.xhtml", index)
+
+    img = soup.find("img")
+    assert img is not None
+    assert img["src"] == "data:image/png;base64,AA=="
+    assert img["srcset"] == "data:image/png;base64,AA== 1x, data:image/png;base64,AA== 2x"
+    assert warnings == []
+
+
+def test_rewrite_images_warns_on_unresolvable_srcset_url() -> None:
+    index = ImageIndex()
+    soup = BeautifulSoup(
+        '<img src="images/missing.png" srcset="images/missing.png 1x">',
+        "html.parser",
+    )
+
+    warnings = rewrite_images(soup, "text/chapter.xhtml", index)
+
+    img = soup.find("img")
+    assert "unresolved-image" in [w.code for w in warnings]
+    assert len(warnings) == 2
