@@ -175,6 +175,54 @@ def sanitize(soup: BeautifulSoup) -> int:
     return removed
 
 
+def _parse_srcset(value: str) -> list[tuple[str, str]]:
+    """Parse a srcset attribute into (url, descriptor) pairs.
+
+    Each comma-separated entry may have a URL followed by an optional
+    width (``600w``) or pixel-density (``2x``) descriptor.
+    """
+    entries: list[tuple[str, str]] = []
+    for part in value.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        tokens = part.split()
+        if len(tokens) == 1:
+            entries.append((tokens[0], ""))
+        else:
+            entries.append((tokens[0], " ".join(tokens[1:])))
+    return entries
+
+
+def _rewrite_srcset(
+    value: str, source_path: str, images: ImageIndex
+) -> tuple[str, list[ConversionWarning]]:
+    """Rewrite every URL inside a srcset value, preserving descriptors.
+
+    URLs that cannot be resolved are kept verbatim so the srcset remains
+    usable, and an ``unresolved-image`` warning is emitted for each.
+    """
+    warnings: list[ConversionWarning] = []
+    rewritten: list[str] = []
+    for url, descriptor in _parse_srcset(value):
+        replacement, warning = images.resolve(source_path, url)
+        entry = f"{url} {descriptor}" if descriptor else url
+        if replacement:
+            entry = f"{replacement} {descriptor}" if descriptor else replacement
+        elif warning:
+            warnings.append(warning)
+        else:
+            warnings.append(
+                ConversionWarning(
+                    "unresolved-image",
+                    f"Could not resolve image {url!r}.",
+                    source_path,
+                )
+            )
+        rewritten.append(entry)
+    return ", ".join(rewritten), warnings
+
+
 def rewrite_images(
     soup: BeautifulSoup, source_path: str, images: ImageIndex
 ) -> list[ConversionWarning]:
@@ -203,6 +251,11 @@ def rewrite_images(
                                 source_path,
                             )
                         )
+    for tag in soup.find_all(["img", "source"]):
+        if value := tag.get("srcset"):
+            rewritten, srcset_warnings = _rewrite_srcset(str(value), source_path, images)
+            tag["srcset"] = rewritten
+            warnings.extend(srcset_warnings)
     return warnings
 
 
