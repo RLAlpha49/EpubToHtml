@@ -128,6 +128,19 @@ def parser() -> argparse.ArgumentParser:
         help="Add an opt-in table of contents and back-to-top links",
     )
     content.add_argument(
+        "--navigation-depth",
+        type=int,
+        choices=range(1, 7),
+        default=1,
+        help="Maximum heading level used for generated navigation; default: 1",
+    )
+    content.add_argument(
+        "--reader-theme",
+        choices=("auto", "light", "dark"),
+        default="auto",
+        help="Wrapped reader color theme; default: auto",
+    )
+    content.add_argument(
         "--reader-max-width",
         help="Set reading width and automatically enable wrapping; default: 72ch",
     )
@@ -220,51 +233,7 @@ def parser() -> argparse.ArgumentParser:
 
 def _options(args: argparse.Namespace) -> ConversionOptions:
     css = args.css.read_text(encoding="utf-8") if args.css else None
-    limits = ArchiveLimits(
-        args.max_archive_entries,
-        args.max_compressed_bytes,
-        args.max_expanded_bytes,
-        args.max_entry_bytes,
-        args.max_compression_ratio,
-        args.max_documents,
-        args.max_images,
-        args.max_output_bytes,
-    )
-    return ConversionOptions(
-        input_path=args.epub_path,
-        output_path=resolve_output_path(args),
-        image_strategy=args.strategy,
-        wrap_html=(
-            args.wrap
-            or bool(css)
-            or args.navigation
-            or args.reader_max_width is not None
-            or args.reader_font_family is not None
-        ),
-        css=css,
-        remove_toc=args.remove_toc,
-        remove_cover=args.remove_cover,
-        images_dir_name=args.images_dir_name,
-        chunked=args.chunked,
-        safe_html=args.safe_mode,
-        force=args.force,
-        archive_limits=limits,
-        deadline_seconds=args.deadline_seconds,
-        fail_on_warning=args.fail_on_warning,
-        validate_output=not args.no_validate_output,
-        stable_mime_types=args.stable_mime_types,
-        newline=args.newline,
-        navigation=args.navigation,
-        reader_max_width=args.reader_max_width or "72ch",
-        reader_font_family=args.reader_font_family or "Georgia, serif",
-        spine_range=_parse_spine_range(args.spine_range),
-        exclude_content=frozenset(args.exclude_content),
-        preserve_internal_css=args.preserve_internal_css,
-        svg_policy=args.svg_policy,
-        mathml_policy=args.mathml_policy,
-        media_policy=args.media_policy,
-        font_policy=args.font_policy,
-    )
+    return ConversionOptions.from_args(args, resolve_output_path(args), css)
 
 
 def resolve_output_path(args: argparse.Namespace) -> Path:

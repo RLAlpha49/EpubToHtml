@@ -134,6 +134,8 @@ EPUB; `-h/--help` prints this reference.
 | `--media-policy {omit,extract,preserve}` | Choose audio/video resource treatment. Extraction copies resources only with `--strategy extract`. | `python main.py book.epub --strategy extract --media-policy extract` |
 | `--font-policy {omit,extract,preserve}` | Choose embedded-font resource treatment. Extraction copies resources only with `--strategy extract`. | `python main.py book.epub --strategy extract --font-policy extract` |
 | `--navigation` | Add an automatically generated table of contents and back-to-top links; automatically enables wrapping. | `python main.py book.epub --navigation` |
+| `--navigation-depth N` | Include headings through level `N` in generated navigation (`1`–`6`); defaults to `1`. | `python main.py book.epub --navigation --navigation-depth 2` |
+| `--reader-theme {auto,light,dark}` | Select the wrapped reader color theme; defaults to `auto`. | `python main.py book.epub --reader-theme dark --wrap` |
 | `--reader-max-width CSS_VALUE` | Set wrapped reading width and automatically enable wrapping; defaults to `72ch` when wrapping is enabled. | `python main.py book.epub --reader-max-width 65ch` |
 | `--reader-font-family CSS_VALUE` | Set wrapped reading font and automatically enable wrapping; defaults to `Georgia, serif` when wrapping is enabled. | `python main.py book.epub --reader-font-family system-ui` |
 | `--force` | Replace existing HTML and extracted-image output. | `python main.py book.epub --force` |

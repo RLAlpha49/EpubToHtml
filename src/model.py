@@ -119,6 +119,8 @@ class ConversionOptions:
     stable_mime_types: bool = False
     newline: Literal["lf", "crlf"] = "lf"
     navigation: bool = False
+    navigation_depth: int = 1
+    reader_theme: Literal["auto", "light", "dark"] = "auto"
     reader_max_width: str = "72ch"
     reader_font_family: str = "Georgia, serif"
     spine_range: tuple[int | None, int | None] | None = None
@@ -128,6 +130,59 @@ class ConversionOptions:
     mathml_policy: Literal["omit", "preserve"] = "omit"
     media_policy: Literal["omit", "extract", "preserve"] = "omit"
     font_policy: Literal["omit", "extract", "preserve"] = "omit"
+
+    @classmethod
+    def from_args(
+        cls, args: Any, output_path: Path, css: str | None = None
+    ) -> ConversionOptions:
+        """Build conversion policy from the CLI namespace in one testable seam."""
+        limits = ArchiveLimits(
+            args.max_archive_entries,
+            args.max_compressed_bytes,
+            args.max_expanded_bytes,
+            args.max_entry_bytes,
+            args.max_compression_ratio,
+            args.max_documents,
+            args.max_images,
+            args.max_output_bytes,
+        )
+        start_end = args.spine_range.split(":", 1) if args.spine_range else None
+        spine_range = None
+        if start_end:
+            start = int(start_end[0]) if start_end[0] else None
+            end = int(start_end[1]) if start_end[1] else None
+            spine_range = (start, end)
+        return cls(
+            input_path=args.epub_path,
+            output_path=output_path,
+            image_strategy=args.strategy,
+            wrap_html=args.wrap or bool(css) or args.navigation or args.reader_max_width is not None or args.reader_font_family is not None,
+            css=css,
+            remove_toc=args.remove_toc,
+            remove_cover=args.remove_cover,
+            images_dir_name=args.images_dir_name,
+            chunked=args.chunked,
+            safe_html=args.safe_mode,
+            force=args.force,
+            archive_limits=limits,
+            deadline_seconds=args.deadline_seconds,
+            fail_on_warning=args.fail_on_warning,
+            validate_output=not args.no_validate_output,
+            stable_mime_types=args.stable_mime_types,
+            newline=args.newline,
+            navigation=args.navigation,
+            navigation_depth=args.navigation_depth,
+            reader_theme=args.reader_theme,
+            reader_max_width=args.reader_max_width or "72ch",
+            reader_font_family=args.reader_font_family or "Georgia, serif",
+            spine_range=spine_range,
+            exclude_content=frozenset(args.exclude_content),
+            preserve_internal_css=args.preserve_internal_css,
+            svg_policy=args.svg_policy,
+            mathml_policy=args.mathml_policy,
+            media_policy=args.media_policy,
+            font_policy=args.font_policy,
+        )
 
     def validate(self) -> None:
         self.archive_limits.validate()
@@ -152,6 +207,10 @@ class ConversionOptions:
             raise ValueError("newline must be 'lf' or 'crlf'")
         if not self.reader_max_width.strip() or not self.reader_font_family.strip():
             raise ValueError("reader presentation values cannot be empty")
+        if self.navigation_depth < 1 or self.navigation_depth > 6:
+            raise ValueError("navigation_depth must be between one and six")
+        if self.reader_theme not in {"auto", "light", "dark"}:
+            raise ValueError("reader_theme must be 'auto', 'light', or 'dark'")
         if self.spine_range:
             start, end = self.spine_range
             if start is not None and start < 1:

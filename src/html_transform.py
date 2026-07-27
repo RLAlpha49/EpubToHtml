@@ -353,13 +353,18 @@ def wrap_document(
     max_width: str,
     font_family: str,
     book: epub.EpubBook | None = None,
+    theme: str = "auto",
+    navigation_depth: int = 1,
 ) -> str:
     """Wrap merged content in an accessible reading shell with opt-in navigation."""
-    styles = (
-        css
-        or f"""
-:root {{ color-scheme: light dark; }}
-body {{ font-family: {font_family}; line-height: 1.6; max-width: {max_width}; margin: 0 auto; padding: clamp(1rem, 4vw, 2rem); }}
+    theme_css = {
+        "auto": ":root { color-scheme: light dark; --page-bg: Canvas; --page-fg: CanvasText; }",
+        "light": ":root { color-scheme: light; --page-bg: #fff; --page-fg: #171717; }",
+        "dark": ":root { color-scheme: dark; --page-bg: #171717; --page-fg: #f5f5f5; }",
+    }[theme]
+    default_styles = f"""
+{theme_css}
+body {{ background: var(--page-bg); color: var(--page-fg); font-family: {font_family}; line-height: 1.6; max-width: {max_width}; margin: 0 auto; padding: clamp(1rem, 4vw, 2rem); }}
 img {{ max-width: 100%; height: auto; }}
 a:focus-visible {{ outline: 3px solid currentColor; outline-offset: 3px; }}
 .skip-link {{ left: 1rem; position: absolute; top: -5rem; }}
@@ -369,24 +374,60 @@ a:focus-visible {{ outline: 3px solid currentColor; outline-offset: 3px; }}
 @media (prefers-reduced-motion: reduce) {{ *, *::before, *::after {{ scroll-behavior: auto !important; transition-duration: 0.01ms !important; }} }}
 @media print {{ body {{ max-width: none; padding: 0; }} .skip-link, .document-navigation, .back-to-top {{ display: none; }} a {{ color: inherit; text-decoration: none; }} }}
 """
-    )
+    styles = f"{theme_css}\n{css}" if css else default_styles
     navigation_markup = ""
     if navigation:
         soup = BeautifulSoup(content, "html.parser")
         entries: list[str] = []
+        source_nav = soup.find(
+            lambda tag: tag.name == "nav"
+            and "toc" in str(tag.get("epub:type", "")).lower().split()
+        )
+        if source_nav is None:
+            source_nav = soup.find(
+                lambda tag: tag.name == "nav"
+                and "toc" in str(tag.get("role", "")).lower().split()
+            )
+        if source_nav is not None:
+            for link in source_nav.find_all("a", href=True):
+                href = str(link["href"])
+                if href.startswith("#"):
+                    destination = href
+                else:
+                    destination = next(
+                        (
+                            f"#{section.get('id')}"
+                            for section in soup.find_all("section", recursive=False)
+                            if re.search(
+                                re.escape(href.split("#", 1)[0]) + r"$",
+                                str(section.get("data-epub-source", "")),
+                            )
+                        ),
+                        href,
+                    )
+                entries.append(
+                    f'<li><a href="{html.escape(destination, quote=True)}">'
+                    f"{html.escape(link.get_text(' ', strip=True))}</a></li>"
+                )
         for number, section in enumerate(soup.find_all("section", recursive=False), start=1):
             section_id = section.get("id")
             if not section_id:
                 continue
-            heading = section.find(re.compile(r"^h[1-6]$"))
-            label = heading.get_text(" ", strip=True) if heading else f"Chapter {number}"
-            entries.append(
-                f'<li><a href="#{html.escape(str(section_id), quote=True)}">'
-                f"{html.escape(label)}</a></li>"
+            headings = section.find_all(re.compile(r"^h[1-6]$"))
+            heading = next(
+                (candidate for candidate in headings if int(candidate.name[1]) <= navigation_depth),
+                None,
             )
-            section.append(
-                BeautifulSoup('<a class="back-to-top" href="#top">Back to top</a>', "html.parser")
-            )
+            if not entries:
+                label = heading.get_text(" ", strip=True) if heading else f"Chapter {number}"
+                entries.append(
+                    f'<li><a href="#{html.escape(str(section_id), quote=True)}">'
+                    f"{html.escape(label)}</a></li>"
+                )
+            if section.find("nav") is None:
+                section.append(
+                    BeautifulSoup('<a class="back-to-top" href="#top">Back to top</a>', "html.parser")
+                )
         content = str(soup)
         if entries:
             navigation_markup = (
@@ -395,18 +436,13 @@ a:focus-visible {{ outline: 3px solid currentColor; outline-offset: 3px; }}
                 + "</ol></nav>"
             )
 
-    # Extract EPUB metadata for inclusion in the HTML head
-    metadata_tags = ""
-    if book is not None:
-        metadata_tags = _extract_epub_metadata(book)
-
+    metadata_tags = _extract_epub_metadata(book) if book is not None else ""
     safe_language = language if re.fullmatch(r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*", language) else "en"
     return (
         f'<!DOCTYPE html>\n<html lang="{html.escape(safe_language, quote=True)}"><head>'
         '<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">'
         f"<title>{html.escape(title or 'EPUB Document', quote=True)}</title>"
-        f"{metadata_tags}"
-        f"<style>{styles}</style>"
+        f"{metadata_tags}<style>{styles}</style>"
         f'</head><body id="top"><a class="skip-link" href="#main-content">Skip to content</a>{navigation_markup}'
         f'<main id="main-content" tabindex="-1">{content}</main></body></html>\n'
     )

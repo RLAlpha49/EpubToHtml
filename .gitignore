@@ -17,3 +17,5 @@ dist/
 build/
 *.egg-info/
 !requirements.lock
+.coverage
+coverage.xml

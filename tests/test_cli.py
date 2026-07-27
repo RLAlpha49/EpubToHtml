@@ -139,3 +139,25 @@ def test_cli_uses_one_output_option_for_both_input_shapes(tmp_path: Path) -> Non
 
     assert resolve_output_path(single).name == "output.html"
     assert resolve_output_path(directory).name == "output"
+
+
+def test_phase_three_options_map_from_parser_namespace(tmp_path: Path) -> None:
+    arguments = parser().parse_args(
+        [
+            "book.epub",
+            "--navigation",
+            "--navigation-depth",
+            "3",
+            "--reader-theme",
+            "dark",
+            "--spine-range",
+            "2:4",
+        ]
+    )
+
+    options = ConversionOptions.from_args(arguments, tmp_path / "book.html")
+
+    assert options.navigation_depth == 3
+    assert options.reader_theme == "dark"
+    assert options.spine_range == (2, 4)
+    assert options.wrap_html

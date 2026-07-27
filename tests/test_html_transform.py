@@ -10,6 +10,7 @@ from html_transform import (
     wrap_html,
 )
 from images import ImageIndex, ImageReference
+from model import DocumentTransformConfig
 
 
 class Item:
@@ -134,6 +135,36 @@ def test_rewrite_images_warns_on_unresolvable_srcset_url() -> None:
 
     warnings = rewrite_images(soup, "text/chapter.xhtml", index)
 
-    img = soup.find("img")
     assert "unresolved-image" in [w.code for w in warnings]
     assert len(warnings) == 2
+
+
+def test_reader_theme_and_navigation_depth_are_rendered() -> None:
+    html = wrap_document(
+        '<section id="chapter"><h2>Opening</h2><p>Text</p></section>',
+        "Book",
+        None,
+        "en",
+        True,
+        "72ch",
+        "serif",
+        theme="dark",
+        navigation_depth=2,
+    )
+
+    assert "color-scheme: dark" in html
+    assert 'href="#chapter">Opening' in html
+
+
+def test_document_transform_config_groups_filtering_policy() -> None:
+    targets = {"chapter.xhtml": DocumentTarget("chapter", {})}
+    result, _ = prepare_document(
+        Item("chapter.xhtml"),
+        '<body><nav class="toc">remove</nav><p>keep</p></body>',
+        targets,
+        ImageIndex(),
+        DocumentTransformConfig(remove_toc=True),
+    )
+
+    assert "remove" not in result
+    assert "keep" in result

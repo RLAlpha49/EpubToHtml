@@ -360,6 +360,8 @@ def _write_output(
                     options.reader_max_width,
                     options.reader_font_family,
                     book,
+                    options.reader_theme,
+                    options.navigation_depth,
                 )
             )
         elif options.chunked:
