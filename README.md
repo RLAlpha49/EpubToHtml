@@ -116,11 +116,15 @@ EPUB; `-h/--help` prints this reference.
 | `--version` | Show the installed tool version and exit. | `epub-to-html --version` |
 | `--print-completion {bash,zsh,fish,powershell}` | Print a complete shell-completion script and exit; it does not modify shell configuration automatically. | `epub-to-html --print-completion powershell` |
 | `-o`, `--output PATH` | Output HTML file for one EPUB, or output directory for an EPUB directory. Defaults to `output.html` for a file and `output` for a directory. | `python main.py book.epub --output converted.html` |
+| `--page-list` | Extract EPUB 3 page-list navigation and render it in wrapped output (requires `--navigation`). | `python main.py book.epub --navigation --page-list` |
 | `--workers N` | Maximum directory-input workers; defaults conservatively to `1`. | `python main.py books --output converted --workers 2` |
+| `--worker-backend {thread,process}` | Parallel execution backend for batch mode; defaults to `thread`. | `python main.py books --output converted --workers 4 --worker-backend process` |
 | `--inspect` | Print EPUB metadata, spine, media inventory, layout signals, and unsupported features without writing output. | `python main.py book.epub --inspect` |
+| `--landmarks` | Extract EPUB 3 landmarks navigation and render it in wrapped output (requires `--navigation`). | `python main.py book.epub --navigation --landmarks` |
 | `-s`, `--strategy {embed,extract}` | Embed images as data URLs or extract them beside the HTML; defaults to `embed`. | `python main.py book.epub --strategy extract` |
 | `-w`, `--wrap` | Add a complete HTML document shell and default styling. It is optional when using any option that needs wrapped output. | `python main.py book.epub --wrap` |
 | `-c`, `--css PATH` | Inline a trusted local stylesheet; automatically enables wrapping. | `python main.py book.epub --css styles.css` |
+| `--css-var KEY=VALUE` | Inject a CSS custom property into `:root` of wrapped output; repeatable. | `python main.py book.epub --css-var accent-color=#1a1a2e --css-var link-color=cornflowerblue --wrap` |
 | `--remove-toc` | Remove detected table-of-contents elements. | `python main.py book.epub --remove-toc` |
 | `--remove-cover` | Remove detected cover elements. | `python main.py book.epub --remove-cover` |
 | `--spine-range START:END` | Convert a one-based inclusive chapter range; either bound may be omitted. | `python main.py book.epub --spine-range 2:8` |
@@ -129,6 +133,8 @@ EPUB; `-h/--help` prints this reference.
 | `--chunked` | Write prepared documents incrementally to staging; navigation requires collecting the generated sections first. | `python main.py book.epub --chunked` |
 | `--safe-mode` | Remove active markup, unsafe URLs, EPUB CSS, SVG, and invalid raster images. | `python main.py book.epub --safe-mode --wrap` |
 | `--preserve-internal-css` | Inline EPUB stylesheets and rewrite their registered local asset URLs; ignored by safe mode. | `python main.py book.epub --preserve-internal-css --wrap` |
+| `--preserve-media-overlays` | Preserve EPUB 3 media-overlay SMIL references as `data-media-overlays` on sections. | `python main.py book.epub --preserve-media-overlays --wrap` |
+| `--preserve-scripts` | Keep `<script>` elements that would normally be stripped by safe mode. | `python main.py book.epub --safe-mode --preserve-scripts` |
 | `--svg-policy {omit,extract,preserve}` | Select SVG handling; safe mode always removes SVG. | `python main.py book.epub --svg-policy preserve` |
 | `--mathml-policy {omit,preserve}` | Select MathML handling; safe mode remains restrictive. | `python main.py book.epub --mathml-policy preserve` |
 | `--media-policy {omit,extract,preserve}` | Choose audio/video resource treatment. Extraction copies resources only with `--strategy extract`. | `python main.py book.epub --strategy extract --media-policy extract` |
@@ -142,6 +148,7 @@ EPUB; `-h/--help` prints this reference.
 | `--deadline-seconds N` | Cancel conversion after the cooperative deadline. | `python main.py book.epub --deadline-seconds 30` |
 | `--fail-on-warning` | Abort without publishing if conversion warnings occur. | `python main.py book.epub --fail-on-warning` |
 | `--no-validate-output` | Skip staged duplicate-ID and local-reference checks. | `python main.py book.epub --no-validate-output` |
+| `--no-resolve-switch` | Keep all branches of EPUB 3 `<switch>` elements instead of resolving them. | `python main.py book.epub --no-resolve-switch` |
 | `--stable-mime-types` | Use known filename-extension MIME types instead of host-dependent MIME guessing. | `python main.py book.epub --stable-mime-types` |
 | `--newline {lf,crlf}` | Select output line endings; defaults to `lf`. | `python main.py book.epub --newline crlf` |
 | `--report-json PATH` | Write a local machine-readable conversion report. | `python main.py book.epub --report-json report.json` |
