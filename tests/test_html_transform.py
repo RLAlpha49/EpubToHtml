@@ -1,4 +1,5 @@
 from bs4 import BeautifulSoup
+from conftest import FakeItem
 
 from html_transform import (
     DocumentTarget,
@@ -13,14 +14,6 @@ from images import ImageIndex, ImageReference
 from model import DocumentTransformConfig
 
 
-class Item:
-    def __init__(self, name: str) -> None:
-        self.name = name
-
-    def get_name(self) -> str:
-        return self.name
-
-
 def test_preparation_namespaces_ids_rewrites_forward_links_and_filters_locally() -> None:
     targets = {
         "text/a.xhtml": DocumentTarget("epub-a", {"same": "epub-a--same"}),
@@ -31,7 +24,7 @@ def test_preparation_namespaces_ids_rewrites_forward_links_and_filters_locally()
     )
 
     result, warnings = prepare_document(
-        Item("text/a.xhtml"), content, targets, ImageIndex(), True, False, False
+        FakeItem("text/a.xhtml"), content, targets, ImageIndex(), True, False, False
     )
 
     assert 'id="epub-a--same"' in result
@@ -92,7 +85,7 @@ def test_queries_are_preserved_while_local_fragments_are_rewritten() -> None:
     )
 
     result, _ = prepare_document(
-        Item("text/a.xhtml"), content, targets, ImageIndex(), False, False, False
+        FakeItem("text/a.xhtml"), content, targets, ImageIndex(), False, False, False
     )
 
     assert 'href="#epub-b--end"' in result
@@ -100,8 +93,8 @@ def test_queries_are_preserved_while_local_fragments_are_rewritten() -> None:
 
 
 def test_targets_add_stable_hashes_for_unicode_slug_collisions() -> None:
-    first = build_targets([(Item("text/Å.xhtml"), '<p id="Å">one</p>')])
-    second = build_targets([(Item("text/Å.xhtml"), '<p id="Å">one</p>')])
+    first = build_targets([(FakeItem("text/Å.xhtml"), '<p id="Å">one</p>')])
+    second = build_targets([(FakeItem("text/Å.xhtml"), '<p id="Å">one</p>')])
 
     target = first["text/Å.xhtml"]
     assert target == second["text/Å.xhtml"]
@@ -159,7 +152,7 @@ def test_reader_theme_and_navigation_depth_are_rendered() -> None:
 def test_document_transform_config_groups_filtering_policy() -> None:
     targets = {"chapter.xhtml": DocumentTarget("chapter", {})}
     result, _ = prepare_document(
-        Item("chapter.xhtml"),
+        FakeItem("chapter.xhtml"),
         '<body><nav class="toc">remove</nav><p>keep</p></body>',
         targets,
         ImageIndex(),

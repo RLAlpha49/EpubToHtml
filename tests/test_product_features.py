@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 import pytest
+from conftest import FakeItem
 
 import api
 import batch
@@ -12,18 +13,10 @@ from model import ConversionOptions, ConversionResult, ConversionWarning
 from report import write_html_report
 
 
-class Item:
-    def __init__(self, name: str) -> None:
-        self.name = name
-
-    def get_name(self) -> str:
-        return self.name
-
-
 def test_content_selection_and_resource_policies_transform_output() -> None:
     content = '<body><section epub:type="appendix">remove</section><math>x</math><svg></svg><p>keep</p></body>'
     result, _ = prepare_document(
-        Item("text/chapter.xhtml"),
+        FakeItem("text/chapter.xhtml"),
         content,
         {"text/chapter.xhtml": DocumentTarget("chapter", {})},
         ImageIndex(),

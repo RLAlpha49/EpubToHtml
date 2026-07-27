@@ -10,6 +10,8 @@ from typing import Any
 
 import pytest
 
+from model import ConversionOptions
+
 # A minimal 1x1 transparent PNG (67 bytes) for image-related tests.
 MINIMAL_PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
@@ -22,6 +24,16 @@ MINIMAL_JPEG = (
     b"\x0b\x0c\x19\x12\x13\x0f\x14\x1d\x1a\x1f\x1e\x1d\x1a\x1c\x1c $.' \"\x1c"
     b"CC\x1eF\x1c\x1c\x1e\x1c\xff\xd9"
 )
+
+
+class FakeItem:
+    """Minimal stand-in for ``ebooklib.EpubItem`` used in transform tests."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def get_name(self) -> str:
+        return self.name
 
 
 def _chapter_html(title: str, body: str) -> str:
@@ -159,3 +171,23 @@ def epub_builder(tmp_path: Path) -> Callable[..., Path]:
         return build_epub(path, **kwargs)
 
     return _build
+
+
+@pytest.fixture
+def sample_options(tmp_path: Path) -> ConversionOptions:
+    """Return a minimal ``ConversionOptions`` for tests that need a policy object."""
+    return ConversionOptions(tmp_path / "book.epub", tmp_path / "book.html")
+
+
+@pytest.fixture
+def wrapped_options(tmp_path: Path) -> ConversionOptions:
+    """Return a ``ConversionOptions`` with ``wrap_html=True``."""
+    return ConversionOptions(tmp_path / "book.epub", tmp_path / "book.html", wrap_html=True)
+
+
+@pytest.fixture
+def safe_options(tmp_path: Path) -> ConversionOptions:
+    """Return a ``ConversionOptions`` with ``safe_html=True``."""
+    return ConversionOptions(
+        tmp_path / "book.epub", tmp_path / "book.html", safe_html=True, wrap_html=True
+    )
