@@ -23,6 +23,7 @@ class DocumentTarget:
 
     anchor: str
     ids: dict[str, str]
+    soup: BeautifulSoup | None = None
 
 
 class NamedDocument(Protocol):
@@ -75,14 +76,15 @@ def build_targets(documents: Sequence[tuple[NamedDocument, str]]) -> dict[str, D
         used_anchors.add(anchor)
         ids: dict[str, str] = {}
         used_ids: set[str] = set()
-        for tag in BeautifulSoup(content, "html.parser").find_all(id=True):
+        soup = BeautifulSoup(content, "html.parser")
+        for tag in soup.find_all(id=True):
             original = str(tag["id"])
             candidate, count = f"{anchor}--{stable_anchor(original)}", 2
             while candidate in used_ids:
                 candidate, count = f"{anchor}--{stable_anchor(original)}-{count}", count + 1
             used_ids.add(candidate)
             ids.setdefault(original, candidate)
-        targets[path] = DocumentTarget(anchor, ids)
+        targets[path] = DocumentTarget(anchor, ids, soup)
     return targets
 
 
@@ -285,7 +287,9 @@ def prepare_document(
     """Apply all document transformations to one already-decoded document."""
     path = normalize_epub_path(item.get_name())
     target = targets[path]
-    soup = BeautifulSoup(content, "html.parser")
+    soup = target.soup
+    if soup is None:
+        soup = BeautifulSoup(content, "html.parser")
     for tag in soup.find_all(id=True):
         if replacement := target.ids.get(str(tag["id"])):
             tag["id"] = replacement
@@ -339,6 +343,7 @@ def wrap_document(
     navigation: bool,
     max_width: str,
     font_family: str,
+    book: epub.EpubBook | None = None,
 ) -> str:
     """Wrap merged content in an accessible reading shell with opt-in navigation."""
     styles = (
@@ -380,11 +385,76 @@ a:focus-visible {{ outline: 3px solid currentColor; outline-offset: 3px; }}
                 + "".join(entries)
                 + "</ol></nav>"
             )
+
+    # Extract EPUB metadata for inclusion in the HTML head
+    metadata_tags = ""
+    if book is not None:
+        metadata_tags = _extract_epub_metadata(book)
+
     safe_language = language if re.fullmatch(r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*", language) else "en"
     return (
         f'<!DOCTYPE html>\n<html lang="{html.escape(safe_language, quote=True)}"><head>'
         '<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">'
-        f"<title>{html.escape(title or 'EPUB Document', quote=True)}</title><style>{styles}</style>"
+        f"<title>{html.escape(title or 'EPUB Document', quote=True)}</title>"
+        f"{metadata_tags}"
+        f"<style>{styles}</style>"
         f'</head><body id="top"><a class="skip-link" href="#main-content">Skip to content</a>{navigation_markup}'
         f'<main id="main-content" tabindex="-1">{content}</main></body></html>\n'
     )
+
+
+def _extract_epub_metadata(book: epub.EpubBook) -> str:
+    """Extract Dublin Core metadata from an EPUB and return as HTML meta tags."""
+    tags: list[str] = []
+
+    # Helper to get metadata values
+    def get_meta(namespace: str, name: str) -> list[str]:
+        try:
+            values = book.get_metadata(namespace, name)
+            result = []
+            for value in values:
+                if isinstance(value, tuple):
+                    result.append(str(value[0]))
+                else:
+                    result.append(str(value))
+            return result
+        except (AttributeError, IndexError, TypeError):
+            return []
+
+    # Dublin Core metadata
+    creators = get_meta("DC", "creator")
+    for creator in creators:
+        tags.append(f'<meta name="author" content="{html.escape(creator, quote=True)}">')
+
+    publishers = get_meta("DC", "publisher")
+    for publisher in publishers:
+        tags.append(f'<meta name="publisher" content="{html.escape(publisher, quote=True)}">')
+
+    dates = get_meta("DC", "date")
+    for date in dates:
+        tags.append(f'<meta name="dcterms.date" content="{html.escape(date, quote=True)}">')
+
+    identifiers = get_meta("DC", "identifier")
+    for identifier in identifiers:
+        tags.append(
+            f'<meta name="dcterms.identifier" content="{html.escape(identifier, quote=True)}">'
+        )
+
+    rights = get_meta("DC", "rights")
+    for right in rights:
+        tags.append(f'<meta name="dcterms.rights" content="{html.escape(right, quote=True)}">')
+
+    descriptions = get_meta("DC", "description")
+    for description in descriptions:
+        tags.append(f'<meta name="description" content="{html.escape(description, quote=True)}">')
+
+    subjects = get_meta("DC", "subject")
+    for subject in subjects:
+        tags.append(f'<meta name="keywords" content="{html.escape(subject, quote=True)}">')
+
+    # Language (already in html lang attribute, but add as meta too)
+    languages = get_meta("DC", "language")
+    for lang in languages:
+        tags.append(f'<meta name="dcterms.language" content="{html.escape(lang, quote=True)}">')
+
+    return "\n".join(tags)

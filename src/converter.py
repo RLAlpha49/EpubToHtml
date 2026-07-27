@@ -15,6 +15,7 @@ from ebooklib import epub
 
 from html_transform import (
     DocumentTarget,
+    _extract_epub_metadata,
     build_targets,
     decode_document,
     prepare_document,
@@ -105,6 +106,21 @@ def _language(book: epub.EpubBook) -> str:
         return value if isinstance(value, str) else "en"
     except (AttributeError, IndexError, TypeError):
         return "en"
+
+
+def _metadata(book: epub.EpubBook) -> dict[str, str]:
+    """Extract Dublin Core metadata from the EPUB."""
+    metadata: dict[str, str] = {}
+    for key in ("creator", "publisher", "date", "identifier", "rights", "description", "subject"):
+        try:
+            value = book.get_metadata("DC", key)[0]
+            if isinstance(value, tuple):
+                value = value[0]
+            if isinstance(value, str) and value.strip():
+                metadata[key] = value.strip()
+        except (AttributeError, IndexError, TypeError):
+            pass
+    return metadata
 
 
 def title(book: epub.EpubBook) -> str | None:
@@ -237,9 +253,7 @@ def _process_stylesheets(
                 )
             )
         except UnicodeDecodeError:
-            diagnostics.add(
-                "skipped-stylesheet", "Stylesheet is not UTF-8.", stylesheet.get_name()
-            )
+            diagnostics.add("skipped-stylesheet", "Stylesheet is not UTF-8.", stylesheet.get_name())
     return "\n".join(css_parts)
 
 
@@ -317,10 +331,12 @@ def _write_output(
                 "\n".join(value for value in (options.css, internal_css) if value)
                 or f"body {{ font-family: {options.reader_font_family}; line-height: 1.6; max-width: {options.reader_max_width}; margin: 0 auto; padding: clamp(1rem, 4vw, 2rem); }} img {{ max-width: 100%; height: auto; }}"
             )
+            metadata_tags = _extract_epub_metadata(book)
             output.write(
                 f'<!DOCTYPE html>\n<html lang="{escape(_language(book), quote=True)}">'
-                f"<head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">"
+                f'<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">'
                 f"<title>{escape(_title(book) or 'EPUB Document', quote=True)}</title>"
+                f"{metadata_tags}"
                 f"<style>{styles}</style></head>"
                 f'<body id="top"><a class="skip-link" href="#main-content">Skip to content</a>'
                 f'<main id="main-content" tabindex="-1">'
@@ -338,6 +354,7 @@ def _write_output(
                     options.navigation,
                     options.reader_max_width,
                     options.reader_font_family,
+                    book,
                 )
             )
         elif options.chunked:
