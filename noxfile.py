@@ -9,7 +9,7 @@ nox.options.default_venv_backend = "virtualenv"
 nox.options.reuse_venv = "yes"
 nox.options.sessions = ("dev",)
 
-TASKS = ("format", "lint", "typecheck", "tests", "build")
+TASKS = ("format", "lint", "typecheck", "tests", "coverage", "build", "security", "lock")
 
 
 def install_project(session: nox.Session) -> None:
@@ -45,16 +45,45 @@ def run_task(session: nox.Session, task: str) -> None:
     if task == "tests":
         session.run("python", "-m", "pytest")
         return
+    if task == "coverage":
+        session.run(
+            "python", "-m", "pytest", "--cov=src", "--cov-report=term-missing", "--cov-report=xml"
+        )
+        return
     if task == "build":
         session.run("python", "-m", "build")
         wheel = next(Path("dist").glob("*.whl"))
         session.run("python", "-m", "pip", "install", "--force-reinstall", "--no-deps", str(wheel))
         session.run("epub-to-html", "--help")
         return
+    if task == "security":
+        session.run("python", "-m", "bandit", "-q", "-r", "src")
+        return
+    if task == "lock":
+        session.run(
+            "python",
+            "-m",
+            "piptools",
+            "compile",
+            "--output-file=requirements.txt",
+            "pyproject.toml",
+            "--quiet",
+        )
+        session.run(
+            "python",
+            "-m",
+            "piptools",
+            "compile",
+            "--output-file=requirements.lock",
+            "--all-extras",
+            "pyproject.toml",
+            "--quiet",
+        )
+        return
     session.error(f"Unhandled task: {task}")
 
 
-@nox.session(name="dev", python="3.12", reuse_venv=True)
+@nox.session(name="dev", python=["3.12"], reuse_venv=True)
 def dev(session: nox.Session) -> None:
     """Run one or more project tasks in a single reusable Nox virtual environment.
 
