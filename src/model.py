@@ -6,7 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from time import monotonic
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 WINDOWS_RESERVED_NAMES = {"con", "prn", "aux", "nul"}
 WINDOWS_RESERVED_NAMES.update(f"com{number}" for number in range(1, 10))
@@ -43,6 +43,16 @@ class ConversionObserver(Protocol):
     def phase(self, description: str, total: int | None = None, unit: str = "") -> None: ...
 
     def advance(self) -> None: ...
+
+
+class EpubReader(Protocol):
+    """Abstract EPUB reader so the converter does not depend on a specific backend.
+
+    A concrete implementation (e.g. wrapping ``ebooklib``) is injected at the
+    top level; tests can supply an in-memory fake.
+    """
+
+    def read(self, path: Path) -> Any: ...
 
 
 @dataclass(frozen=True)

@@ -30,11 +30,14 @@ from model import (
     ConversionObserver,
     ConversionOptions,
     ConversionResult,
+    DocumentTransformConfig,
+    EpubReader,
     InvalidEpubError,
     OutputValidationError,
     WarningCollector,
 )
 from output import StagedOutput
+from reader import EbookLibReader
 
 
 def preflight_archive(path: Path, options: ConversionOptions) -> None:
@@ -365,7 +368,9 @@ def _write_output(
 
 
 def convert(
-    options: ConversionOptions, observer: ConversionObserver | None = None
+    options: ConversionOptions,
+    observer: ConversionObserver | None = None,
+    reader: EpubReader | None = None,
 ) -> ConversionResult:
     """Convert one EPUB according to an immutable policy and return its outcome."""
     options.validate()
@@ -377,7 +382,7 @@ def convert(
     diagnostics = WarningCollector()
     if observer:
         observer.phase("Reading EPUB")
-    book = epub.read_epub(str(options.input_path))
+    book = (reader or EbookLibReader()).read(options.input_path)
     _check_cancelled(options, started_at)
     items = list(book.get_items())
     documents = _selected_documents(_documents(book), options)
