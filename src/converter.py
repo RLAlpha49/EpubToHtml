@@ -380,6 +380,8 @@ def _prepare_sections(
                 excluded=options.exclude_content,
                 svg_policy=options.svg_policy,
                 mathml_policy=options.mathml_policy,
+                preserve_scripts=options.preserve_scripts,
+                resolve_switch=options.resolve_switch,
             ),
             chapter_titles=chapter_titles,
             add_back_to_top=add_back_to_top,
@@ -433,6 +435,9 @@ def _write_output(
                     options.reader_theme,
                     options.navigation_depth,
                     chapter_titles,
+                    options.css_vars,
+                    options.landmarks,
+                    options.page_list,
                 )
             )
         elif options.chunked:
