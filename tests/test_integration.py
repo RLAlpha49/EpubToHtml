@@ -261,17 +261,14 @@ def test_convert_safe_mode_strips_active_content(tmp_path: Path, epub_builder) -
         chapters=[
             (
                 "Ch 1",
-                '<p>safe</p><script>alert(1)</script>'
-                '<img onerror="evil()" src="images/test.png">',
+                '<p>safe</p><script>alert(1)</script><img onerror="evil()" src="images/test.png">',
             )
         ],
         images=[("test.png", MINIMAL_PNG, "image/png")],
     )
     output = tmp_path / "out.html"
 
-    result = convert(
-        ConversionOptions(epub_path, output, wrap_html=True, safe_html=True)
-    )
+    result = convert(ConversionOptions(epub_path, output, wrap_html=True, safe_html=True))
 
     content = _read(output)
     assert "safe" in content
@@ -324,9 +321,7 @@ def test_convert_spine_range_limits_documents(tmp_path: Path, epub_builder) -> N
     )
     output = tmp_path / "out.html"
 
-    result = convert(
-        ConversionOptions(epub_path, output, wrap_html=True, spine_range=(2, 3))
-    )
+    result = convert(ConversionOptions(epub_path, output, wrap_html=True, spine_range=(2, 3)))
 
     content = _read(output)
     assert "<p>two</p>" in content
@@ -447,9 +442,7 @@ def test_convert_force_overwrites_existing_output(tmp_path: Path, epub_builder) 
     output = tmp_path / "out.html"
     output.write_text("old content", encoding="utf-8")
 
-    result = convert(
-        ConversionOptions(epub_path, output, wrap_html=True, force=True)
-    )
+    result = convert(ConversionOptions(epub_path, output, wrap_html=True, force=True))
 
     content = _read(output)
     assert "old content" not in content

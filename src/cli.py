@@ -290,6 +290,8 @@ def _print_result(result: ConversionResult) -> None:
     summary.add_row("Duration", f"{result.duration_seconds:.2f}s")
     summary.add_row("Input size", f"{result.input_bytes:,} bytes")
     summary.add_row("Output size", f"{result.output_bytes:,} bytes")
+    if result.peak_memory_bytes is not None:
+        summary.add_row("Peak memory", f"{result.peak_memory_bytes:,} bytes")
     if result.images_path:
         summary.add_row("Images directory", str(result.images_path))
     summary.add_row("HTML output", str(result.output_path))
