@@ -140,7 +140,9 @@ class ExtractedImageOutput(ImageOutput):
         with (self.directory / candidate).open("xb") as output:
             output.write(content)
         # Set consistent read permissions for extracted files.
-        os.chmod(self.directory / candidate, stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH)
+        os.chmod(
+            self.directory / candidate, stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH
+        )
         return ImageReference(
             item.get_name(),
             "/".join(quote(part, safe="") for part in (self.directory.name, candidate)),
