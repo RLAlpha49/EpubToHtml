@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import json
 from html import escape
 from pathlib import Path
 
-from model import ConversionResult
+from model import ConversionOptions, ConversionResult
 
 
 def write_html_report(path: Path, result: ConversionResult) -> None:
@@ -28,5 +29,40 @@ def write_html_report(path: Path, result: ConversionResult) -> None:
         f"<p><strong>Output:</strong> <code>{escape(str(result.output_path))}</code></p>"
         f"<p>{result.documents_processed} chapters; {result.images_processed} images; {result.output_bytes:,} bytes.</p>"
         f"<h2>Chapters</h2><ol>{chapters}</ol><h2>Warnings and policy findings</h2><ul>{warnings}</ul></html>",
+        encoding="utf-8",
+    )
+
+
+def write_json_report(path: Path, result: ConversionResult, options: ConversionOptions) -> None:
+    """Write a local JSON report for automation; no telemetry is sent."""
+    path.write_text(
+        json.dumps(
+            {
+                "status": "success",
+                "tool_version": "1.0.0",
+                "input_path": str(options.input_path),
+                "output_path": str(result.output_path),
+                "images_path": str(result.images_path) if result.images_path else None,
+                "documents_processed": result.documents_processed,
+                "images_processed": result.images_processed,
+                "skipped_images": result.skipped_images,
+                "skipped_documents": result.skipped_documents,
+                "decode_fallbacks": result.decode_fallbacks,
+                "duration_seconds": result.duration_seconds,
+                "input_bytes": result.input_bytes,
+                "output_bytes": result.output_bytes,
+                "warnings": [warning.__dict__ for warning in result.warnings],
+                "policy": {
+                    "image_strategy": options.image_strategy,
+                    "safe_mode": result.safe_html,
+                    "chunked": result.chunked,
+                    "navigation": options.navigation,
+                    "validate_output": options.validate_output,
+                    "newline": options.newline,
+                },
+            },
+            indent=2,
+        )
+        + "\n",
         encoding="utf-8",
     )
