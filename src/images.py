@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import base64
 import mimetypes
+import os
 import posixpath
+import stat
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
 from urllib.parse import quote, unquote, urlsplit
 
 from ebooklib import epub
@@ -38,10 +40,27 @@ class ImageReference:
     url: str
 
 
-class ImageOutput(Protocol):
+class ImageOutput(ABC):
     """A focused output strategy for EPUB image resources."""
 
+    @abstractmethod
     def register(self, item: epub.EpubItem) -> ImageReference: ...
+
+    @staticmethod
+    def media_type_for(item: epub.EpubItem, stable_mime_types: bool = False) -> str | None:
+        """Determine a stable web media type from manifest metadata or common extensions."""
+        if item.media_type:
+            return item.media_type
+        known_types = {
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".png": "image/png",
+            ".gif": "image/gif",
+            ".webp": "image/webp",
+            ".svg": "image/svg+xml",
+        }
+        known = known_types.get(Path(item.get_name()).suffix.lower())
+        return known if stable_mime_types else known or mimetypes.guess_type(item.get_name())[0]
 
 
 class ImageIndex:
@@ -79,23 +98,7 @@ class ImageIndex:
         return None, None
 
 
-def media_type_for(item: epub.EpubItem, stable_mime_types: bool = False) -> str | None:
-    """Determine a stable web media type from manifest metadata or common extensions."""
-    if item.media_type:
-        return item.media_type
-    known_types = {
-        ".jpg": "image/jpeg",
-        ".jpeg": "image/jpeg",
-        ".png": "image/png",
-        ".gif": "image/gif",
-        ".webp": "image/webp",
-        ".svg": "image/svg+xml",
-    }
-    known = known_types.get(Path(item.get_name()).suffix.lower())
-    return known if stable_mime_types else known or mimetypes.guess_type(item.get_name())[0]
-
-
-class EmbeddedImageOutput:
+class EmbeddedImageOutput(ImageOutput):
     """Register images as self-contained data URLs."""
 
     def __init__(self, safe: bool = False, stable_mime_types: bool = False) -> None:
@@ -103,7 +106,7 @@ class EmbeddedImageOutput:
         self.stable_mime_types = stable_mime_types
 
     def register(self, item: epub.EpubItem) -> ImageReference:
-        media_type = media_type_for(item, self.stable_mime_types)
+        media_type = self.media_type_for(item, self.stable_mime_types)
         if not media_type:
             raise ValueError(f"Cannot determine media type for image {item.get_name()!r}")
         content = item.get_content()
@@ -113,7 +116,7 @@ class EmbeddedImageOutput:
         return ImageReference(item.get_name(), f"data:{media_type};base64,{encoded}")
 
 
-class ExtractedImageOutput:
+class ExtractedImageOutput(ImageOutput):
     """Register images in a private staging directory using collision-safe names."""
 
     def __init__(self, directory: Path, safe: bool = False) -> None:
@@ -122,7 +125,7 @@ class ExtractedImageOutput:
         self.safe = safe
 
     def register(self, item: epub.EpubItem) -> ImageReference:
-        media_type = media_type_for(item)
+        media_type = self.media_type_for(item)
         content = item.get_content()
         if self.safe and (not media_type or not supported_raster_image(media_type, content)):
             raise ValueError(f"Unsupported or invalid safe-mode image: {item.get_name()!r}")
@@ -136,6 +139,8 @@ class ExtractedImageOutput:
         self.directory.mkdir(parents=True, exist_ok=True)
         with (self.directory / candidate).open("xb") as output:
             output.write(content)
+        # Set consistent read permissions for extracted files.
+        os.chmod(self.directory / candidate, stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH)
         return ImageReference(
             item.get_name(),
             "/".join(quote(part, safe="") for part in (self.directory.name, candidate)),
