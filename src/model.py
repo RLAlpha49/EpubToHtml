@@ -132,9 +132,7 @@ class ConversionOptions:
     font_policy: Literal["omit", "extract", "preserve"] = "omit"
 
     @classmethod
-    def from_args(
-        cls, args: Any, output_path: Path, css: str | None = None
-    ) -> ConversionOptions:
+    def from_args(cls, args: Any, output_path: Path, css: str | None = None) -> ConversionOptions:
         """Build conversion policy from the CLI namespace in one testable seam."""
         limits = ArchiveLimits(
             args.max_archive_entries,
@@ -156,7 +154,11 @@ class ConversionOptions:
             input_path=args.epub_path,
             output_path=output_path,
             image_strategy=args.strategy,
-            wrap_html=args.wrap or bool(css) or args.navigation or args.reader_max_width is not None or args.reader_font_family is not None,
+            wrap_html=args.wrap
+            or bool(css)
+            or args.navigation
+            or args.reader_max_width is not None
+            or args.reader_font_family is not None,
             css=css,
             remove_toc=args.remove_toc,
             remove_cover=args.remove_cover,

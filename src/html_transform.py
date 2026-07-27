@@ -380,13 +380,11 @@ a:focus-visible {{ outline: 3px solid currentColor; outline-offset: 3px; }}
         soup = BeautifulSoup(content, "html.parser")
         entries: list[str] = []
         source_nav = soup.find(
-            lambda tag: tag.name == "nav"
-            and "toc" in str(tag.get("epub:type", "")).lower().split()
+            lambda tag: tag.name == "nav" and "toc" in str(tag.get("epub:type", "")).lower().split()
         )
         if source_nav is None:
             source_nav = soup.find(
-                lambda tag: tag.name == "nav"
-                and "toc" in str(tag.get("role", "")).lower().split()
+                lambda tag: tag.name == "nav" and "toc" in str(tag.get("role", "")).lower().split()
             )
         if source_nav is not None:
             for link in source_nav.find_all("a", href=True):
@@ -426,7 +424,9 @@ a:focus-visible {{ outline: 3px solid currentColor; outline-offset: 3px; }}
                 )
             if section.find("nav") is None:
                 section.append(
-                    BeautifulSoup('<a class="back-to-top" href="#top">Back to top</a>', "html.parser")
+                    BeautifulSoup(
+                        '<a class="back-to-top" href="#top">Back to top</a>', "html.parser"
+                    )
                 )
         content = str(soup)
         if entries:

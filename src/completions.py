@@ -18,11 +18,18 @@ def _choices(action: argparse.Action) -> tuple[str, ...]:
 
 
 def _long_options(actions: Iterable[argparse.Action]) -> list[str]:
-    return [option for action in actions for option in action.option_strings if option.startswith("--")]
+    return [
+        option for action in actions for option in action.option_strings if option.startswith("--")
+    ]
 
 
 def _short_options(actions: Iterable[argparse.Action]) -> list[str]:
-    return [option for action in actions for option in action.option_strings if option.startswith("-") and not option.startswith("--")]
+    return [
+        option
+        for action in actions
+        for option in action.option_strings
+        if option.startswith("-") and not option.startswith("--")
+    ]
 
 
 def generate_completions(parser: argparse.ArgumentParser) -> dict[str, str]:
@@ -32,9 +39,7 @@ def generate_completions(parser: argparse.ArgumentParser) -> dict[str, str]:
     short_options = _short_options(actions)
     all_options = [*long_options, *short_options]
     value_map = {
-        action.option_strings[-1]: _choices(action)
-        for action in actions
-        if _choices(action)
+        action.option_strings[-1]: _choices(action) for action in actions if _choices(action)
     }
     words = " ".join(all_options)
     bash_cases = "\n".join(
@@ -51,10 +56,14 @@ def generate_completions(parser: argparse.ArgumentParser) -> dict[str, str]:
 }}
 complete -F _epub_to_html_complete epub-to-html'''
 
-    zsh_lines = ["#compdef epub-to-html", "_arguments \\", "    '1:EPUB file:_files -g \"*.epub\"' \\"]
+    zsh_lines = [
+        "#compdef epub-to-html",
+        "_arguments \\",
+        "    '1:EPUB file:_files -g \"*.epub\"' \\",
+    ]
     for action in actions:
         choices = _choices(action)
-        suffix = f':value:({" ".join(choices)})' if choices else ""
+        suffix = f":value:({' '.join(choices)})" if choices else ""
         help_text = (action.help or "Option").replace("'", "")
         for option in action.option_strings:
             zsh_lines.append(f"    '{option}[{help_text}]{suffix}' \\")
