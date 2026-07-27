@@ -279,7 +279,7 @@ def _print_plan(options: ConversionOptions) -> None:
     )
 
 
-def _print_result(result: ConversionResult) -> None:
+def _print_result(result: ConversionResult, verbose: bool = False) -> None:
     summary = Table.grid(padding=(0, 1))
     summary.add_column(style="bold cyan", justify="right")
     summary.add_column()
@@ -296,11 +296,15 @@ def _print_result(result: ConversionResult) -> None:
         summary.add_row("Images directory", str(result.images_path))
     summary.add_row("HTML output", str(result.output_path))
     console.print(Panel(summary, title="[bold green]Conversion complete[/]", border_style="green"))
-    for warning in result.warnings[:10]:
+    limit = len(result.warnings) if verbose else min(len(result.warnings), 10)
+    for warning in result.warnings[:limit]:
         location = f" ({warning.location})" if warning.location else ""
         console.print(f"[yellow]Warning:[/] {warning.message}{location}")
-    if len(result.warnings) > 10:
-        console.print(f"[yellow]… and {len(result.warnings) - 10} more warning(s).[/]")
+    if len(result.warnings) > limit:
+        remaining = len(result.warnings) - limit
+        console.print(f"[yellow]… and {remaining} more warning(s).[/]")
+        if not verbose:
+            console.print("[dim]Rerun with --verbose to show all warnings.[/]")
 
 
 def main() -> None:
@@ -380,7 +384,7 @@ def main() -> None:
                 )
             )
         raise SystemExit(3) from None
-    _print_result(result)
+    _print_result(result, args.verbose)
     if args.report_json:
         try:
             write_json_report(args.report_json, result, options)
