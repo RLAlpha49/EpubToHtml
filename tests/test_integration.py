@@ -185,9 +185,7 @@ def test_convert_chunked_wrap_html_includes_epub_metadata(tmp_path: Path, epub_b
     )
     output = tmp_path / "out.html"
 
-    result = convert(
-        ConversionOptions(epub_path, output, wrap_html=True, chunked=True)
-    )
+    result = convert(ConversionOptions(epub_path, output, wrap_html=True, chunked=True))
 
     content = _read(output)
     assert '<meta name="author" content="John Smith">' in content
@@ -348,9 +346,7 @@ def test_convert_chunked_output_streams_sections(tmp_path: Path, epub_builder) -
     )
     output = tmp_path / "out.html"
 
-    result = convert(
-        ConversionOptions(epub_path, output, chunked=True, wrap_html=True)
-    )
+    result = convert(ConversionOptions(epub_path, output, chunked=True, wrap_html=True))
 
     assert output.exists()
     content = _read(output)
@@ -373,6 +369,18 @@ def test_convert_result_reports_input_and_output_bytes(tmp_path: Path, epub_buil
     assert result.input_bytes == epub_path.stat().st_size
     assert result.output_bytes == output.stat().st_size
     assert result.output_bytes > 0
+
+
+def test_convert_result_reports_peak_memory(tmp_path: Path, epub_builder) -> None:
+    epub_path = epub_builder(
+        chapters=[("Ch 1", "<p>alpha</p>"), ("Ch 2", "<p>beta</p>")],
+    )
+    output = tmp_path / "out.html"
+
+    result = convert(ConversionOptions(epub_path, output, wrap_html=True))
+
+    assert result.peak_memory_bytes is not None
+    assert result.peak_memory_bytes > 0
 
 
 def test_convert_result_chapters_list_contains_source_names(tmp_path: Path, epub_builder) -> None:

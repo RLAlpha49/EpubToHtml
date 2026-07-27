@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -69,6 +70,30 @@ def test_batch_expands_directories_and_isolates_individual_failures(
     assert output_for(good, tmp_path / "out") == tmp_path / "out" / "good.html"
 
 
+def test_batch_accepts_worker_backend_parameter(tmp_path: Path) -> None:
+    bad = tmp_path / "bad.epub"
+    bad.write_bytes(b"")
+    template = ConversionOptions(bad, tmp_path / "ignored.html")
+
+    # workers=1 should ignore worker_backend and run sequentially.
+    result = convert_batch(
+        (tmp_path,), template, tmp_path / "out", workers=1, worker_backend="process"
+    )
+    assert result.failed >= 1
+
+
+def test_batch_rejects_invalid_worker_backend(tmp_path: Path) -> None:
+    template = ConversionOptions(tmp_path / "x.epub", tmp_path / "ignored.html")
+    with pytest.raises(ValueError, match="worker_backend"):
+        convert_batch((tmp_path,), template, tmp_path / "out", workers=2, worker_backend="invalid")  # type: ignore[arg-type]
+
+
+def test_batch_rejects_zero_workers(tmp_path: Path) -> None:
+    template = ConversionOptions(tmp_path / "x.epub", tmp_path / "ignored.html")
+    with pytest.raises(ValueError, match="workers must be at least"):
+        convert_batch((tmp_path,), template, tmp_path / "out", workers=0)
+
+
 def test_library_api_replaces_only_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     captured: list[ConversionOptions] = []
 
@@ -107,3 +132,31 @@ def test_html_report_contains_chapters_and_warnings(tmp_path: Path) -> None:
 
     content = report_path.read_text(encoding="utf-8")
     assert "chapter.xhtml" in content and "Missing cover" in content
+
+
+def test_json_report_includes_peak_memory(tmp_path: Path) -> None:
+    from report import write_json_report as write_report
+
+    report_path = tmp_path / "report.json"
+    result = ConversionResult(
+        tmp_path / "book.html",
+        None,
+        1,
+        0,
+        0,
+        0,
+        0,
+        (),
+        0.5,
+        False,
+        False,
+        input_bytes=100,
+        output_bytes=200,
+        peak_memory_bytes=65536,
+    )
+    options = ConversionOptions(tmp_path / "book.epub", tmp_path / "book.html")
+
+    write_report(report_path, result, options)
+
+    payload = json.loads(report_path.read_text(encoding="utf-8"))
+    assert payload["peak_memory_bytes"] == 65536

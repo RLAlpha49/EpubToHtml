@@ -28,6 +28,7 @@ def write_html_report(path: Path, result: ConversionResult) -> None:
         "<h1>EPUB conversion report</h1>"
         f"<p><strong>Output:</strong> <code>{escape(str(result.output_path))}</code></p>"
         f"<p>{result.documents_processed} chapters; {result.images_processed} images; {result.output_bytes:,} bytes.</p>"
+        f"{f'<p><strong>Peak memory:</strong> {result.peak_memory_bytes:,} bytes.</p>' if result.peak_memory_bytes is not None else ''}"
         f"<h2>Chapters</h2><ol>{chapters}</ol><h2>Warnings and policy findings</h2><ul>{warnings}</ul></html>",
         encoding="utf-8",
     )
@@ -51,6 +52,7 @@ def write_json_report(path: Path, result: ConversionResult, options: ConversionO
                 "duration_seconds": result.duration_seconds,
                 "input_bytes": result.input_bytes,
                 "output_bytes": result.output_bytes,
+                "peak_memory_bytes": result.peak_memory_bytes,
                 "warnings": [warning.__dict__ for warning in result.warnings],
                 "policy": {
                     "image_strategy": options.image_strategy,

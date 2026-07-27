@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import stat
+import tracemalloc
 import zipfile
 from collections.abc import Iterator
 from html import escape
+from html.parser import HTMLParser
 from pathlib import Path
 from time import monotonic
 
 import ebooklib
-from bs4 import BeautifulSoup
 from ebooklib import epub
 
 from html_transform import (
@@ -171,19 +172,53 @@ def _check_cancelled(options: ConversionOptions, started_at: float) -> None:
 
 
 def _validate_staged_html(path: Path) -> None:
-    soup = BeautifulSoup(path.read_text(encoding="utf-8"), "html.parser")
-    ids = [str(tag["id"]) for tag in soup.find_all(id=True)]
-    if len(ids) != len(set(ids)):
-        raise OutputValidationError("Generated output contains duplicate HTML IDs.")
-    known = set(ids)
-    for link in soup.find_all("a", href=True):
-        href = str(link["href"])
-        if href.startswith("#") and href[1:] and href[1:] not in known:
-            raise OutputValidationError(f"Generated output has unresolved local link: {href}")
-    for tag in soup.find_all(src=True):
-        source = str(tag["src"])
-        if source and not source.startswith(("data:", "http:", "https:", "//")):
-            raise OutputValidationError(f"Generated output has unresolved local resource: {source}")
+    """Validate staged HTML for duplicate IDs and broken local links without loading the full file into memory.
+
+    Uses a streaming ``HTMLParser`` subclass that tracks IDs, ``href``
+    fragments, and local ``src`` references in a single pass, keeping a
+    bounded amount of state proportional to the number of unique IDs rather
+    than the file size.
+    """
+    ids: set[str] = set()
+    seen_ids: set[str] = set()
+    local_fragment_refs: set[str] = set()
+    local_src_refs: set[str] = set()
+
+    class _ValidatorParser(HTMLParser):
+        """Streaming parser that collects IDs, fragment links, and local src references."""
+
+        def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+            attr_map = dict(attrs)
+            tag_id = attr_map.get("id")
+            if tag_id is not None:
+                if tag_id in seen_ids:
+                    raise OutputValidationError(
+                        f"Generated output contains duplicate HTML ID: {tag_id!r}"
+                    )
+                seen_ids.add(tag_id)
+                ids.add(tag_id)
+            href = attr_map.get("href")
+            if href is not None and href.startswith("#") and len(href) > 1:
+                local_fragment_refs.add(href[1:])
+            src = attr_map.get("src")
+            if src is not None and src and not src.startswith(("data:", "http:", "https:", "//")):
+                local_src_refs.add(src)
+
+    parser = _ValidatorParser()
+    with path.open("r", encoding="utf-8") as f:
+        while chunk := f.read(64 * 1024):
+            parser.feed(chunk)
+    parser.close()
+
+    missing = local_fragment_refs - ids
+    if missing:
+        raise OutputValidationError(
+            f"Generated output has unresolved local link(s): {', '.join(sorted(missing))}"
+        )
+    if local_src_refs:
+        raise OutputValidationError(
+            f"Generated output has unresolved local resource(s): {', '.join(sorted(local_src_refs))}"
+        )
 
 
 def _process_images(
@@ -386,68 +421,80 @@ def convert(
     diagnostics = WarningCollector()
     if observer:
         observer.phase("Reading EPUB")
-    book = (reader or EbookLibReader()).read(options.input_path)
-    _check_cancelled(options, started_at)
-    items = list(book.get_items())
-    documents = _selected_documents(_documents(book), options)
-    images = [
-        item for item in items if item.get_type() in (ebooklib.ITEM_IMAGE, ebooklib.ITEM_COVER)
-    ]
-    resources = [
-        item
-        for item in items
-        if str(item.media_type or "").startswith(("audio/", "video/", "font/", "application/font"))
-    ]
-    stylesheets = [item for item in items if str(item.media_type or "").lower() == "text/css"]
-    if len(documents) > options.archive_limits.max_documents:
-        raise ArchiveLimitError("EPUB contains more documents than allowed.")
-    if len(images) > options.archive_limits.max_images:
-        raise ArchiveLimitError("EPUB contains more images than allowed.")
-    images_name = (
-        options.images_dir_name.format(stem=options.output_path.stem)
-        if options.image_strategy == "extract"
-        else None
-    )
-
-    with StagedOutput(options.output_path, images_name, options.force) as staged:
-        index = ImageIndex()
-        processed_images, skipped = _process_images(
-            images, resources, options, staged, index, started_at, diagnostics, observer
-        )
-        internal_css = _process_stylesheets(stylesheets, options, index, diagnostics)
-        decoded, skipped_documents = _decode_documents(
-            documents, options, started_at, diagnostics, observer
-        )
-        targets = build_targets(decoded)
-        sections = _prepare_sections(
-            decoded, targets, index, options, started_at, diagnostics, observer
-        )
-        if observer:
-            observer.phase("Writing output")
-        _write_output(sections, staged, options, book, internal_css)
-        if staged.size() > options.archive_limits.max_output_bytes:
-            raise ArchiveLimitError("Generated output exceeds configured output limit.")
-        if options.validate_output and staged.html_path:
-            _validate_staged_html(staged.html_path)
-        if options.fail_on_warning and diagnostics.warnings:
-            raise ConversionError(
-                "Conversion produced warnings and --fail-on-warning was requested."
+    # Start memory tracing before the main work begins.
+    tracemalloc.start()
+    try:
+        book = (reader or EbookLibReader()).read(options.input_path)
+        _check_cancelled(options, started_at)
+        items = list(book.get_items())
+        documents = _selected_documents(_documents(book), options)
+        images = [
+            item for item in items if item.get_type() in (ebooklib.ITEM_IMAGE, ebooklib.ITEM_COVER)
+        ]
+        resources = [
+            item
+            for item in items
+            if str(item.media_type or "").startswith(
+                ("audio/", "video/", "font/", "application/font")
             )
-        staged.commit()
+        ]
+        stylesheets = [item for item in items if str(item.media_type or "").lower() == "text/css"]
+        if len(documents) > options.archive_limits.max_documents:
+            raise ArchiveLimitError("EPUB contains more documents than allowed.")
+        if len(images) > options.archive_limits.max_images:
+            raise ArchiveLimitError("EPUB contains more images than allowed.")
+        images_name = (
+            options.images_dir_name.format(stem=options.output_path.stem)
+            if options.image_strategy == "extract"
+            else None
+        )
 
-    return ConversionResult(
-        options.output_path,
-        options.output_path.parent / images_name if images_name else None,
-        len(documents),
-        processed_images,
-        skipped,
-        skipped_documents,
-        sum(warning.code == "decode-fallback" for warning in diagnostics.warnings),
-        diagnostics.warnings,
-        diagnostics.duration_seconds,
-        options.chunked,
-        options.safe_html,
-        options.input_path.stat().st_size,
-        options.output_path.stat().st_size,
-        chapters=tuple(item.get_name() for item, _ in decoded),
-    )
+        with StagedOutput(options.output_path, images_name, options.force) as staged:
+            index = ImageIndex()
+            processed_images, skipped = _process_images(
+                images, resources, options, staged, index, started_at, diagnostics, observer
+            )
+            internal_css = _process_stylesheets(stylesheets, options, index, diagnostics)
+            decoded, skipped_documents = _decode_documents(
+                documents, options, started_at, diagnostics, observer
+            )
+            targets = build_targets(decoded)
+            sections = _prepare_sections(
+                decoded, targets, index, options, started_at, diagnostics, observer
+            )
+            if observer:
+                observer.phase("Writing output")
+            _write_output(sections, staged, options, book, internal_css)
+            if staged.size() > options.archive_limits.max_output_bytes:
+                raise ArchiveLimitError("Generated output exceeds configured output limit.")
+            if options.validate_output and staged.html_path:
+                _validate_staged_html(staged.html_path)
+            if options.fail_on_warning and diagnostics.warnings:
+                raise ConversionError(
+                    "Conversion produced warnings and --fail-on-warning was requested."
+                )
+            staged.commit()
+
+        peak_memory_bytes = tracemalloc.get_traced_memory()[1]
+        tracemalloc.stop()
+
+        return ConversionResult(
+            options.output_path,
+            options.output_path.parent / images_name if images_name else None,
+            len(documents),
+            processed_images,
+            skipped,
+            skipped_documents,
+            sum(warning.code == "decode-fallback" for warning in diagnostics.warnings),
+            diagnostics.warnings,
+            diagnostics.duration_seconds,
+            options.chunked,
+            options.safe_html,
+            options.input_path.stat().st_size,
+            options.output_path.stat().st_size,
+            peak_memory_bytes=peak_memory_bytes,
+            chapters=tuple(item.get_name() for item, _ in decoded),
+        )
+    except BaseException:
+        tracemalloc.stop()
+        raise
