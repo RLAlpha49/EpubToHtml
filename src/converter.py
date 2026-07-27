@@ -91,9 +91,7 @@ def preflight_archive(path: Path, options: ConversionOptions) -> None:
             mimetype_entry = archive.getinfo("mimetype")
             mimetype_content = archive.read(mimetype_entry)
             if mimetype_content.strip() != b"application/epub+zip":
-                raise InvalidEpubError(
-                    "EPUB mimetype file must contain 'application/epub+zip'."
-                )
+                raise InvalidEpubError("EPUB mimetype file must contain 'application/epub+zip'.")
             if mimetype_content != b"application/epub+zip":
                 raise InvalidEpubError(
                     "EPUB mimetype file must not contain trailing whitespace or newlines."

@@ -16,7 +16,10 @@ Nox is the project command interface on every platform:
 - `python -m nox -s lint` runs Ruff lint rules.
 - `python -m nox -s typecheck` runs mypy using the committed EbookLib stubs.
 - `python -m nox -s tests` runs pytest on supported Python versions.
+- `python -m nox -s coverage` runs pytest with coverage reporting (XML + terminal).
 - `python -m nox -s build` builds a wheel, installs it, and checks `epub-to-html --help`.
+- `python -m nox -s security` runs `bandit` security scan on `src/`.
+- `python -m nox -s lock` regenerates `requirements.txt` and `requirements.lock` from `pyproject.toml`.
 
 Run `python -m nox` before opening a pull request.
 
@@ -71,7 +74,7 @@ python -m mypy
 
 This project follows [Conventional Commits](https://www.conventionalcommits.org/):
 
-```
+```text
 <type>[optional scope]: <description>
 
 [optional body]
@@ -93,7 +96,7 @@ Common types:
 
 Example:
 
-```
+```text
 fix(html_transform): reject non-image data URLs in safe mode
 
 The safe_url() function accepted data: URLs with any MIME type that
