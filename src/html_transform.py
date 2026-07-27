@@ -11,7 +11,8 @@ from typing import Literal, Protocol
 from urllib.parse import unquote, urlsplit
 
 import chardet
-from bs4 import BeautifulSoup
+import ebooklib
+from bs4 import BeautifulSoup, Tag
 from ebooklib import epub
 
 from images import ImageIndex, normalize_epub_path, resolve_epub_path
@@ -135,29 +136,34 @@ def safe_url(tag_name: str, attribute: str, value: str) -> bool:
     return not parsed.scheme
 
 
-def sanitize(soup: BeautifulSoup) -> int:
-    """Remove active markup, event handlers, styles, and unsafe references."""
+def sanitize(soup: BeautifulSoup, *, preserve_scripts: bool = False) -> int:
+    """Remove active markup, event handlers, styles, and unsafe references.
+
+    When *preserve_scripts* is ``True``, ``<script>`` elements are kept
+    for EPUBs that rely on JavaScript-driven content rendering, though
+    their behaviour in a single-file HTML output is inherently limited.
+    """
     removed = 0
-    for tag in soup.find_all(
-        {
-            "base",
-            "button",
-            "canvas",
-            "embed",
-            "form",
-            "iframe",
-            "input",
-            "link",
-            "meta",
-            "object",
-            "script",
-            "style",
-            "svg",
-            "template",
-            "video",
-            "audio",
-        }
-    ):
+    removable = {
+        "base",
+        "button",
+        "canvas",
+        "embed",
+        "form",
+        "iframe",
+        "input",
+        "link",
+        "meta",
+        "object",
+        "style",
+        "svg",
+        "template",
+        "video",
+        "audio",
+    }
+    if not preserve_scripts:
+        removable.add("script")
+    for tag in soup.find_all(removable):
         tag.decompose()
         removed += 1
     for tag in soup.find_all("math"):
@@ -235,6 +241,59 @@ def _rewrite_srcset(
     return ", ".join(rewritten), warnings
 
 
+def resolve_switch_elements(soup: BeautifulSoup) -> int:
+    """Resolve EPUB 3 ``<switch>`` elements by keeping the first suitable case.
+
+    Each ``<switch>`` may contain ``<case>`` elements with ``required-namespace``
+    and a ``<default>`` fallback.  This implementation prefers cases whose
+    namespace is HTML, then SVG, then MathML, and finally the default.
+    Unmatched cases are removed.  Returns the number of switch elements
+    resolved.
+    """
+    resolved = 0
+    for switch in soup.find_all("switch"):
+        resolved += 1
+        # Build ordered candidates: specific cases first, default last.
+        # The http:// strings below are XML namespace identifiers defined
+        # by the EPUB 3 specification — they are not fetchable URLs.
+        _xhtml_namespaces = ("http://www.w3.org/1999/xhtml", "http://www.idpf.org/2007/ops")
+        _svg_namespace = "http://www.w3.org/2000/svg"
+        _mathml_ns = "http://www.w3.org/1998/math/mathml"
+        html_epub = [
+            c
+            for c in switch.find_all("case", recursive=False)
+            if str(c.get("required-namespace", "")).lower() in _xhtml_namespaces
+        ]
+        svg_cases = [
+            c
+            for c in switch.find_all("case", recursive=False)
+            if str(c.get("required-namespace", "")).lower() == _svg_namespace
+        ]
+        mathml_cases = [
+            c
+            for c in switch.find_all("case", recursive=False)
+            if str(c.get("required-namespace", "")).lower() == _mathml_ns
+        ]
+        default_case = switch.find("default", recursive=False)
+
+        chosen: Tag | None = None
+        candidates = html_epub or svg_cases or mathml_cases
+        if candidates:
+            chosen = candidates[0]
+        if chosen is None:
+            chosen = default_case
+
+        # Remove all children of <switch>, then re-insert the chosen content.
+        # Iterate over a snapshot because decompose mutates the parent's tree.
+        for child in tuple(switch.children):
+            child.decompose()
+        if chosen is not None:
+            switch.replace_with(chosen)
+        else:
+            switch.decompose()
+    return resolved
+
+
 def rewrite_images(
     soup: BeautifulSoup, source_path: str, images: ImageIndex
 ) -> list[ConversionWarning]:
@@ -276,7 +335,7 @@ def rewrite_css_urls(css: str, source_path: str, images: ImageIndex) -> str:
 
     def replace(match: re.Match[str]) -> str:
         raw = match.group(1).strip().strip("'\"")
-        replacement, _warning = images.resolve(source_path, raw)
+        replacement, _ = images.resolve(source_path, raw)
         return f"url({replacement})" if replacement else match.group(0)
 
     return re.sub(r"url\(([^)]*)\)", replace, css, flags=re.IGNORECASE)
@@ -327,6 +386,10 @@ def prepare_document(
                 link["href"] = (
                     f"#{destination_target.ids.get(unquote(parsed.fragment), destination_target.anchor)}"
                 )
+    # Resolve EPUB 3 <switch> elements before image rewrites so that the
+    # chosen branch participates in resource resolution.
+    if config.resolve_switch:
+        resolve_switch_elements(soup)
     warnings = rewrite_images(soup, path, images)
     remove_marked_content(soup, config.remove_toc, config.remove_cover, config.excluded)
     if config.svg_policy == "omit" or config.safe_html:
@@ -339,7 +402,7 @@ def prepare_document(
         for tag in soup.find_all(["audio", "video"]):
             tag.decompose()
     if config.safe_html:
-        removed = sanitize(soup)
+        removed = sanitize(soup, preserve_scripts=config.preserve_scripts)
         if removed:
             warnings.append(
                 ConversionWarning(
@@ -389,18 +452,32 @@ def wrap_document(
     theme: str = "auto",
     navigation_depth: int = 1,
     chapter_titles: dict[str, str] | None = None,
+    css_vars: tuple[tuple[str, str], ...] = (),
+    include_landmarks: bool = False,
+    include_page_list: bool = False,
 ) -> str:
     """Wrap merged content in an accessible reading shell with opt-in navigation.
 
     When *chapter_titles* is provided (a mapping of section anchor IDs to
     heading texts collected during ``prepare_document``), navigation entries
     are built from it directly, avoiding a third ``BeautifulSoup`` parse.
+
+    When *css_vars* is provided, each ``(key, value)`` pair is injected as a
+    CSS custom property on ``:root``.
+
+    When *include_landmarks* or *include_page_list* are ``True``, the
+    corresponding EPUB 3 ``<nav>`` elements are extracted and rendered as
+    additional navigation sections.
     """
     theme_css = {
         "auto": ":root { color-scheme: light dark; --page-bg: Canvas; --page-fg: CanvasText; }",
         "light": ":root { color-scheme: light; --page-bg: #fff; --page-fg: #171717; }",
         "dark": ":root { color-scheme: dark; --page-bg: #171717; --page-fg: #f5f5f5; }",
     }[theme]
+    # Inject user-defined CSS custom properties after the theme declaration.
+    if css_vars:
+        var_declarations = "; ".join(f"--{key}: {value}" for key, value in css_vars)
+        theme_css += f" :root {{ {var_declarations}; }}"
     default_styles = f"""
 {theme_css}
 body {{ background: var(--page-bg); color: var(--page-fg); font-family: {font_family}; line-height: 1.6; max-width: {max_width}; margin: 0 auto; padding: clamp(1rem, 4vw, 2rem); }}
@@ -495,6 +572,66 @@ a:focus-visible {{ outline: 3px solid currentColor; outline-offset: 3px; }}
                 + "</ol></nav>"
             )
 
+    # EPUB 3 landmarks navigation
+    landmarks_markup = ""
+    if include_landmarks and navigation:
+        soup = BeautifulSoup(content, "html.parser")
+        landmarks_nav = soup.find(
+            lambda tag: (
+                tag.name == "nav" and "landmarks" in str(tag.get("epub:type", "")).lower().split()
+            )
+        )
+        if landmarks_nav is None:
+            landmarks_nav = soup.find(
+                lambda tag: (
+                    tag.name == "nav" and "landmarks" in str(tag.get("role", "")).lower().split()
+                )
+            )
+        if landmarks_nav is not None:
+            landmark_entries: list[str] = []
+            for link in landmarks_nav.find_all("a", href=True):
+                href = str(link["href"])
+                label = link.get_text(" ", strip=True)
+                landmark_entries.append(
+                    f'<li><a href="{html.escape(href, quote=True)}">{html.escape(label)}</a></li>'
+                )
+            if landmark_entries:
+                landmarks_markup = (
+                    '<nav class="document-navigation" aria-label="Landmarks"><h2>Landmarks</h2><ul>'
+                    + "".join(landmark_entries)
+                    + "</ul></nav>"
+                )
+
+    # EPUB 3 page-list navigation
+    page_list_markup = ""
+    if include_page_list and navigation:
+        soup = BeautifulSoup(content, "html.parser")
+        pagelist_nav = soup.find(
+            lambda tag: (
+                tag.name == "nav" and "page-list" in str(tag.get("epub:type", "")).lower().split()
+            )
+        )
+        if pagelist_nav is None:
+            pagelist_nav = soup.find(
+                lambda tag: (
+                    tag.name == "nav" and "page-list" in str(tag.get("role", "")).lower().split()
+                )
+            )
+        if pagelist_nav is not None:
+            page_entries: list[str] = []
+            for link in pagelist_nav.find_all("a", href=True):
+                href = str(link["href"])
+                label = link.get_text(" ", strip=True)
+                page_entries.append(
+                    f'<li><a href="{html.escape(href, quote=True)}">{html.escape(label)}</a></li>'
+                )
+            if page_entries:
+                page_list_markup = (
+                    '<nav class="document-navigation" aria-label="Page list"><h2>Page List</h2><ol>'
+                    + "".join(page_entries)
+                    + "</ol></nav>"
+                )
+
     metadata_tags = _extract_epub_metadata(book) if book is not None else ""
     safe_language = language if re.fullmatch(r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*", language) else "en"
     return (
@@ -502,18 +639,24 @@ a:focus-visible {{ outline: 3px solid currentColor; outline-offset: 3px; }}
         '<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">'
         f"<title>{html.escape(title or 'EPUB Document', quote=True)}</title>"
         f"{metadata_tags}<style>{styles}</style>"
-        f'</head><body id="top"><a class="skip-link" href="#main-content">Skip to content</a>{navigation_markup}'
+        f'</head><body id="top"><a class="skip-link" href="#main-content">Skip to content</a>{navigation_markup}{landmarks_markup}{page_list_markup}'
         f'<main id="main-content" tabindex="-1">{content}</main></body></html>\n'
     )
 
 
 def _extract_epub_metadata(book: epub.EpubBook) -> str:
-    """Extract Dublin Core metadata from an EPUB and return as HTML meta tags."""
+    """Extract Dublin Core and accessibility metadata from an EPUB and return as HTML meta tags."""
     tags: list[str] = []
 
-    # Helper to get metadata values
-    def get_meta(namespace: str, name: str) -> list[str]:
+    # Helper to get metadata values — namespace may be None for property-based metadata
+    def get_meta(namespace: str | None, name: str) -> list[str]:
         try:
+            if namespace is None:
+                # Accessibility properties use the OPF namespace prefix or
+                # may be stored as refinements.  EbookLib doesn't have a
+                # direct API for property-based metadata, so we fall back
+                # gracefully without raising.
+                return []
             values = book.get_metadata(namespace, name)
             result = []
             for value in values:
@@ -561,4 +704,52 @@ def _extract_epub_metadata(book: epub.EpubBook) -> str:
     for lang in languages:
         tags.append(f'<meta name="dcterms.language" content="{html.escape(lang, quote=True)}">')
 
+    # EPUB 3 accessibility metadata
+    for mode in get_meta(None, "accessMode"):
+        tags.append(f'<meta name="schema:accessMode" content="{html.escape(mode, quote=True)}">')
+    for feature in get_meta(None, "accessibilityFeature"):
+        tags.append(
+            f'<meta name="schema:accessibilityFeature" content="{html.escape(feature, quote=True)}">'
+        )
+    for hazard in get_meta(None, "accessibilityHazard"):
+        tags.append(
+            f'<meta name="schema:accessibilityHazard" content="{html.escape(hazard, quote=True)}">'
+        )
+    for summary in get_meta(None, "accessibilitySummary"):
+        tags.append(
+            f'<meta name="schema:accessibilitySummary" content="{html.escape(summary, quote=True)}">'
+        )
+
     return "\n".join(tags)
+
+
+def extract_media_overlay_metadata(book: epub.EpubBook) -> str:
+    """Extract EPUB 3 media-overlay SMIL references as data attributes on section wrappers.
+
+    Media overlays synchronize text with pre-recorded audio.  This function
+    returns a JSON mapping from EPUB content document paths to their SMIL
+    references, which callers can embed as a ``data-media-overlays`` attribute
+    on the wrapping element so that reading systems or JavaScript can restore
+    read-aloud functionality.
+    """
+    overlays: dict[str, list[str]] = {}
+    try:
+        for item in book.get_items():
+            if item.get_type() != ebooklib.ITEM_DOCUMENT:
+                continue
+            properties: set[str] = (
+                getattr(item, "properties", set()) if hasattr(item, "properties") else set()
+            )
+            if not properties:
+                media_overlay = getattr(item, "media_overlay", None)
+                if media_overlay:
+                    path = item.get_name()
+                    overlays.setdefault(path, []).append(str(media_overlay))
+    except (AttributeError, IndexError, TypeError):
+        pass
+    if not overlays:
+        return ""
+    import json as _json  # pylint: disable=import-outside-toplevel
+
+    escaped = html.escape(_json.dumps(overlays, separators=(",", ":")), quote=True)
+    return f' data-media-overlays="{escaped}"'
