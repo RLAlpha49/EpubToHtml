@@ -85,6 +85,18 @@ class ArchiveLimits:
 
 
 @dataclass(frozen=True)
+class DocumentTransformConfig:
+    """Document filtering and policy settings used by the transformation seam."""
+
+    remove_toc: bool = False
+    remove_cover: bool = False
+    safe_html: bool = False
+    excluded: frozenset[str] = field(default_factory=frozenset[str])
+    svg_policy: Literal["omit", "extract", "preserve"] = "omit"
+    mathml_policy: Literal["omit", "preserve"] = "omit"
+
+
+@dataclass(frozen=True)
 class ConversionOptions:
     """Validated immutable configuration for a conversion request."""
 

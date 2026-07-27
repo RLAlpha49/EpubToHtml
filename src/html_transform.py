@@ -7,14 +7,14 @@ import html
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Literal, Protocol
 from urllib.parse import unquote, urlsplit
 
 from bs4 import BeautifulSoup
 from ebooklib import epub
 
 from images import ImageIndex, normalize_epub_path, resolve_epub_path
-from model import ConversionWarning
+from model import ConversionWarning, DocumentTransformConfig
 
 
 @dataclass(frozen=True)
@@ -277,14 +277,23 @@ def prepare_document(
     content: str,
     targets: dict[str, DocumentTarget],
     images: ImageIndex,
-    remove_toc: bool,
-    remove_cover: bool,
-    safe_html: bool,
+    config: DocumentTransformConfig | bool,
+    remove_cover: bool = False,
+    safe_html: bool = False,
     excluded: frozenset[str] = frozenset(),
-    svg_policy: str = "omit",
-    mathml_policy: str = "omit",
+    svg_policy: Literal["omit", "extract", "preserve"] = "omit",
+    mathml_policy: Literal["omit", "preserve"] = "omit",
 ) -> tuple[str, list[ConversionWarning]]:
     """Apply all document transformations to one already-decoded document."""
+    if isinstance(config, bool):
+        config = DocumentTransformConfig(
+            remove_toc=config,
+            remove_cover=remove_cover,
+            safe_html=safe_html,
+            excluded=excluded,
+            svg_policy=svg_policy,
+            mathml_policy=mathml_policy,
+        )
     path = normalize_epub_path(item.get_name())
     target = targets[path]
     soup = target.soup
@@ -302,17 +311,17 @@ def prepare_document(
                     f"#{destination_target.ids.get(unquote(parsed.fragment), destination_target.anchor)}"
                 )
     warnings = rewrite_images(soup, path, images)
-    remove_marked_content(soup, remove_toc, remove_cover, excluded)
-    if svg_policy == "omit" or safe_html:
+    remove_marked_content(soup, config.remove_toc, config.remove_cover, config.excluded)
+    if config.svg_policy == "omit" or config.safe_html:
         for tag in soup.find_all("svg"):
             tag.decompose()
-    if mathml_policy == "omit":
+    if config.mathml_policy == "omit":
         for tag in soup.find_all("math"):
             tag.decompose()
-    if safe_html or svg_policy == "omit":
+    if config.safe_html or config.svg_policy == "omit":
         for tag in soup.find_all(["audio", "video"]):
             tag.decompose()
-    if safe_html:
+    if config.safe_html:
         removed = sanitize(soup)
         if removed:
             warnings.append(

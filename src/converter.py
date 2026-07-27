@@ -306,12 +306,14 @@ def _prepare_sections(
             content,
             targets,
             index,
-            options.remove_toc,
-            options.remove_cover,
-            options.safe_html,
-            options.exclude_content,
-            options.svg_policy,
-            options.mathml_policy,
+            DocumentTransformConfig(
+                remove_toc=options.remove_toc,
+                remove_cover=options.remove_cover,
+                safe_html=options.safe_html,
+                excluded=options.exclude_content,
+                svg_policy=options.svg_policy,
+                mathml_policy=options.mathml_policy,
+            ),
         )
         for warning in warnings:
             diagnostics.add(warning.code, warning.message, warning.location)
