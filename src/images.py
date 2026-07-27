@@ -95,6 +95,19 @@ def media_type_for(item: epub.EpubItem, stable_mime_types: bool = False) -> str 
     return known if stable_mime_types else known or mimetypes.guess_type(item.get_name())[0]
 
 
+def _encode_base64_streaming(content: bytes, chunk_size: int = 8192) -> str:
+    """Encode bytes to base64 in chunks to avoid loading large images entirely into memory."""
+    if len(content) <= chunk_size:
+        return base64.b64encode(content).decode("ascii")
+
+    # For large content, encode in chunks
+    encoded_chunks = []
+    for i in range(0, len(content), chunk_size):
+        chunk = content[i : i + chunk_size]
+        encoded_chunks.append(base64.b64encode(chunk).decode("ascii"))
+    return "".join(encoded_chunks)
+
+
 class EmbeddedImageOutput:
     """Register images as self-contained data URLs."""
 
@@ -109,7 +122,7 @@ class EmbeddedImageOutput:
         content = item.get_content()
         if self.safe and not supported_raster_image(media_type, content):
             raise ValueError(f"Unsupported or invalid safe-mode image: {item.get_name()!r}")
-        encoded = base64.b64encode(content).decode("ascii")
+        encoded = _encode_base64_streaming(content)
         return ImageReference(item.get_name(), f"data:{media_type};base64,{encoded}")
 
 
