@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import zipfile
 from collections import Counter
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -54,13 +55,17 @@ def inspect_epub(path: Path, options: ConversionOptions) -> InspectionResult:
     if any("mathml" in name for name in names):
         unsupported.append("MathML")
     fixed = any("rendition:layout" in name or "fixed" in name for name in names)
+    # Compute total asset bytes from the ZIP archive headers rather than
+    # loading every item into memory, which is wasteful for large EPUBs.
+    with zipfile.ZipFile(str(path)) as archive:
+        asset_bytes = sum(entry.file_size for entry in archive.infolist())
     return InspectionResult(
         path,
         title(book),
         language(book),
         tuple(item.get_name() for item in document_items(book)),
         dict(sorted(media_types.items())),
-        sum(len(item.get_content()) for item in items),
+        asset_bytes,
         fixed,
         tuple(unsupported),
     )
