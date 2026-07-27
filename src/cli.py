@@ -154,6 +154,39 @@ def parser() -> argparse.ArgumentParser:
         "--reader-font-family",
         help="Set reading font and automatically enable wrapping; default: Georgia, serif",
     )
+    content.add_argument(
+        "--css-var",
+        action="append",
+        default=[],
+        dest="css_vars",
+        metavar="KEY=VALUE",
+        help="Inject one or more CSS custom properties into wrapped output; repeatable",
+    )
+    content.add_argument(
+        "--preserve-scripts",
+        action="store_true",
+        help="Preserve script elements that would normally be removed",
+    )
+    content.add_argument(
+        "--preserve-media-overlays",
+        action="store_true",
+        help="Preserve EPUB 3 media-overlay SMIL references in the output",
+    )
+    content.add_argument(
+        "--landmarks",
+        action="store_true",
+        help="Extract and render EPUB 3 landmarks navigation in wrapped output",
+    )
+    content.add_argument(
+        "--page-list",
+        action="store_true",
+        help="Extract and render EPUB 3 page-list navigation in wrapped output",
+    )
+    content.add_argument(
+        "--no-resolve-switch",
+        action="store_true",
+        help="Do not resolve EPUB 3 switch elements (keep all branches)",
+    )
     safety.add_argument("--force", action="store_true", help="Replace existing output")
     safety.add_argument(
         "--deadline-seconds", type=float, help="Cancel after this conversion deadline"
@@ -237,8 +270,20 @@ def parser() -> argparse.ArgumentParser:
     return result
 
 
+def _parse_css_vars(raw: list[str]) -> tuple[tuple[str, str], ...]:
+    """Parse ``--css-var KEY=VALUE`` arguments into key-value tuples."""
+    parsed: list[tuple[str, str]] = []
+    for item in raw:
+        key, sep, value = item.partition("=")
+        if not sep or not key.strip() or not value.strip():
+            raise ValueError(f"CSS variable must use 'KEY=VALUE' format (got: {item!r})")
+        parsed.append((key.strip(), value.strip()))
+    return tuple(parsed)
+
+
 def _options(args: argparse.Namespace) -> ConversionOptions:
     css = args.css.read_text(encoding="utf-8") if args.css else None
+    args.css_vars = _parse_css_vars(args.css_vars)
     return ConversionOptions.from_args(args, resolve_output_path(args), css)
 
 
