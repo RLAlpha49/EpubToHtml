@@ -193,9 +193,11 @@ Python integrations can call the documented library API without subprocesses:
 from api import convert
 from model import ConversionOptions
 
-result = convert("book.epub", "book.html", ConversionOptions(
-    input_path="unused.epub", output_path="unused.html", safe_html=True
-))
+result = convert(
+    "book.epub",
+    "book.html",
+    ConversionOptions(input_path="unused.epub", output_path="unused.html", safe_html=True),
+)
 print(result.output_path)
 ```
 
@@ -280,6 +282,13 @@ build the project. To run one activity, use `python -m nox -- tests`,
 The test suite covers archive policy, conversion transforms, image handling,
 output staging, and CLI behavior. Contributions should include a focused regression
 test when they change observable conversion behavior.
+
+## Documentation
+
+- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — Module overview, data flow, design decisions, and extension points.
+- **[docs/API.md](docs/API.md)** — Full library API reference for Python integrations.
+- **[docs/WARNINGS.md](docs/WARNINGS.md)** — Warning codes reference for troubleshooting conversion diagnostics.
+- **[CONTRIBUTING.md](CONTRIBUTING.md)** — Development setup, testing strategy, and code style guide.
 
 ## License
 
