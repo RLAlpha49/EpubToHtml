@@ -96,6 +96,8 @@ class DocumentTransformConfig:
     excluded: frozenset[str] = field(default_factory=frozenset[str])
     svg_policy: Literal["omit", "extract", "preserve"] = "omit"
     mathml_policy: Literal["omit", "preserve"] = "omit"
+    preserve_scripts: bool = False
+    resolve_switch: bool = True
 
 
 @dataclass(frozen=True)
@@ -132,6 +134,12 @@ class ConversionOptions:
     mathml_policy: Literal["omit", "preserve"] = "omit"
     media_policy: Literal["omit", "extract", "preserve"] = "omit"
     font_policy: Literal["omit", "extract", "preserve"] = "omit"
+    css_vars: tuple[tuple[str, str], ...] = ()
+    preserve_scripts: bool = False
+    preserve_media_overlays: bool = False
+    landmarks: bool = False
+    page_list: bool = False
+    resolve_switch: bool = True
 
     @classmethod
     def from_args(cls, args: Any, output_path: Path, css: str | None = None) -> ConversionOptions:
@@ -186,6 +194,12 @@ class ConversionOptions:
             mathml_policy=args.mathml_policy,
             media_policy=args.media_policy,
             font_policy=args.font_policy,
+            css_vars=args.css_vars,
+            preserve_scripts=args.preserve_scripts,
+            preserve_media_overlays=args.preserve_media_overlays,
+            landmarks=args.landmarks,
+            page_list=args.page_list,
+            resolve_switch=not args.no_resolve_switch,
         )
 
     def validate(self) -> None:
