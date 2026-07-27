@@ -12,6 +12,38 @@ from typing import TextIO
 from model import OutputError
 
 
+class AtomicPublisher:
+    """Atomically publish staged files to their final destinations with rollback.
+
+    Moves staged files into place while backing up any existing targets.  If any
+    move fails, all committed moves are rolled back and backups are restored.
+    """
+
+    def __init__(self) -> None:
+        self._moved: list[tuple[Path, Path]] = []
+        self._committed: list[Path] = []
+
+    def publish(self, staged: Path, final: Path, backup_dir: Path) -> None:
+        """Move *staged* to *final*, saving any existing *final* into *backup_dir*."""
+        if final.exists():
+            saved = backup_dir / final.name
+            os.replace(final, saved)
+            self._moved.append((final, saved))
+        os.replace(staged, final)
+        self._committed.append(final)
+
+    def rollback(self) -> None:
+        """Undo every committed move and restore the original targets."""
+        for target in reversed(self._committed):
+            if target.is_dir():
+                shutil.rmtree(target, ignore_errors=True)
+            else:
+                target.unlink(missing_ok=True)
+        for target, saved in reversed(self._moved):
+            if saved.exists():
+                os.replace(saved, target)
+
+
 class StagedOutput:
     """Write conversion results privately, then atomically publish them."""
 
@@ -73,28 +105,13 @@ class StagedOutput:
         backup = Path(
             tempfile.mkdtemp(prefix=f".{self.final_html.stem}-backup-", dir=self.final_html.parent)
         )
-        moved: list[tuple[Path, Path]] = []
-        committed: list[Path] = []
+        publisher = AtomicPublisher()
         try:
-            for target in (self.final_html, self.final_images):
-                if target and target.exists():
-                    saved = backup / target.name
-                    os.replace(target, saved)
-                    moved.append((target, saved))
-            os.replace(self.html_path, self.final_html)
-            committed.append(self.final_html)
+            publisher.publish(self.html_path, self.final_html, backup)
             if self.images_path and self.images_path.exists() and self.final_images:
-                os.replace(self.images_path, self.final_images)
-                committed.append(self.final_images)
+                publisher.publish(self.images_path, self.final_images, backup)
         except OSError as error:
-            for target in reversed(committed):
-                if target.is_dir():
-                    shutil.rmtree(target, ignore_errors=True)
-                else:
-                    target.unlink(missing_ok=True)
-            for target, saved in reversed(moved):
-                if saved.exists():
-                    os.replace(saved, target)
+            publisher.rollback()
             raise OutputError(f"Could not commit converted output: {error}") from error
         finally:
             shutil.rmtree(backup, ignore_errors=True)
