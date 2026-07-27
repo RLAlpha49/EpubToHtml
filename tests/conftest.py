@@ -60,6 +60,7 @@ def build_epub(
     css: str | None = None,
     toc: bool = True,
     include_nav: bool = True,
+    metadata: dict[str, str] | None = None,
 ) -> Path:
     """Build a minimal but valid EPUB file at *path*.
 
@@ -106,7 +107,8 @@ def build_epub(
         f'    <dc:title>{title}</dc:title>\n'
         f'    <dc:creator>{author}</dc:creator>\n'
         f'    <dc:language>{language}</dc:language>\n'
-        '    <meta property="dcterms:modified">2024-01-01T00:00:00Z</meta>\n'
+        + ("".join(f"    <dc:{key}>{value}</dc:{key}>\n" for key, value in (metadata or {}).items()))
+        + '    <meta property="dcterms:modified">2024-01-01T00:00:00Z</meta>\n'
         "  </metadata>\n"
         "  <manifest>\n"
         + "\n".join(f"    {m}" for m in manifest)

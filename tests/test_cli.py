@@ -1,8 +1,10 @@
 import json
 from pathlib import Path
 
-from cli import COMPLETIONS, parser, tool_version, write_report
+from cli import parser, tool_version
+from completions import COMPLETIONS
 from model import ConversionOptions, ConversionResult
+from report import write_json_report as write_report
 
 
 def test_cli_exposes_archive_limit_configuration() -> None:

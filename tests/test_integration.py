@@ -152,6 +152,60 @@ def test_convert_wrap_html_includes_title_and_language(tmp_path: Path, epub_buil
     assert 'lang="fr"' in content
 
 
+def test_convert_wrap_html_includes_epub_metadata(tmp_path: Path, epub_builder) -> None:
+    epub_path = epub_builder(
+        title="Metadata Book",
+        author="Jane Doe",
+        metadata={
+            "publisher": "Acme Press",
+            "date": "2024-06-01",
+            "rights": "CC BY-SA 4.0",
+            "description": "A book about metadata.",
+            "subject": "Testing",
+        },
+    )
+    output = tmp_path / "out.html"
+
+    result = convert(ConversionOptions(epub_path, output, wrap_html=True))
+
+    content = _read(output)
+    assert '<meta name="author" content="Jane Doe">' in content
+    assert '<meta name="publisher" content="Acme Press">' in content
+    assert '<meta name="dcterms.date" content="2024-06-01">' in content
+    assert '<meta name="dcterms.rights" content="CC BY-SA 4.0">' in content
+    assert '<meta name="description" content="A book about metadata.">' in content
+    assert '<meta name="keywords" content="Testing">' in content
+
+
+def test_convert_chunked_wrap_html_includes_epub_metadata(tmp_path: Path, epub_builder) -> None:
+    epub_path = epub_builder(
+        title="Chunked Metadata Book",
+        author="John Smith",
+        metadata={"publisher": "Beta Publishing", "rights": "All rights reserved"},
+    )
+    output = tmp_path / "out.html"
+
+    result = convert(
+        ConversionOptions(epub_path, output, wrap_html=True, chunked=True)
+    )
+
+    content = _read(output)
+    assert '<meta name="author" content="John Smith">' in content
+    assert '<meta name="publisher" content="Beta Publishing">' in content
+    assert '<meta name="dcterms.rights" content="All rights reserved">' in content
+
+
+def test_convert_wrap_html_without_metadata_omits_meta_tags(tmp_path: Path, epub_builder) -> None:
+    epub_path = epub_builder()
+    output = tmp_path / "out.html"
+
+    result = convert(ConversionOptions(epub_path, output, wrap_html=True))
+
+    content = _read(output)
+    assert '<meta name="publisher"' not in content
+    assert '<meta name="dcterms.rights"' not in content
+
+
 # ---------------------------------------------------------------------------
 # CSS
 # ---------------------------------------------------------------------------
