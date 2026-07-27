@@ -86,6 +86,18 @@ def preflight_archive(path: Path, options: ConversionOptions) -> None:
                 raise InvalidEpubError(
                     f"EPUB archive is missing required member(s): {', '.join(sorted(missing))}"
                 )
+            # Validate the mimetype file content: the EPUB spec requires it to
+            # contain exactly "application/epub+zip" with no trailing newline.
+            mimetype_entry = archive.getinfo("mimetype")
+            mimetype_content = archive.read(mimetype_entry)
+            if mimetype_content.strip() != b"application/epub+zip":
+                raise InvalidEpubError(
+                    "EPUB mimetype file must contain 'application/epub+zip'."
+                )
+            if mimetype_content != b"application/epub+zip":
+                raise InvalidEpubError(
+                    "EPUB mimetype file must not contain trailing whitespace or newlines."
+                )
     except zipfile.BadZipFile as error:
         raise InvalidEpubError(f"Input is not a valid ZIP/EPUB archive: {error}") from error
 
@@ -424,7 +436,7 @@ def convert(
     # Start memory tracing before the main work begins.
     tracemalloc.start()
     try:
-        book = (reader or EbookLibReader()).read(options.input_path)
+        book = (reader or EbookLibReader()).read(options.input_path, options.deadline_seconds)
         _check_cancelled(options, started_at)
         items = list(book.get_items())
         documents = _selected_documents(_documents(book), options)

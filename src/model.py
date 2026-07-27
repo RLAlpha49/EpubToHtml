@@ -52,7 +52,7 @@ class EpubReader(Protocol):
     top level; tests can supply an in-memory fake.
     """
 
-    def read(self, path: Path) -> Any: ...
+    def read(self, path: Path, timeout: float | None = None) -> Any: ...
 
 
 @dataclass(frozen=True)

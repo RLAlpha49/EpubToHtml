@@ -7,10 +7,9 @@ from collections import Counter
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from ebooklib import epub
-
 from converter import document_items, language, preflight_archive, title
 from model import ConversionOptions
+from reader import EbookLibReader
 
 
 @dataclass(frozen=True)
@@ -38,7 +37,7 @@ def inspect_epub(path: Path, options: ConversionOptions) -> InspectionResult:
         input_path=path, output_path=options.output_path, archive_limits=options.archive_limits
     )
     preflight_archive(path, inspected_options)
-    book = epub.read_epub(str(path))
+    book = EbookLibReader().read(path, options.deadline_seconds)
     items = list(book.get_items())
     media_types = Counter(str(item.media_type or "unknown") for item in items)
     names = [item.get_name().lower() for item in items]
