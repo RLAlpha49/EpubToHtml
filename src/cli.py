@@ -75,6 +75,12 @@ def parser() -> argparse.ArgumentParser:
     )
     input_output.add_argument("--workers", type=int, default=1, help="Batch workers; default: 1")
     input_output.add_argument(
+        "--worker-backend",
+        choices=("thread", "process"),
+        default="thread",
+        help="Parallel execution backend for batch mode; default: thread",
+    )
+    input_output.add_argument(
         "--inspect", action="store_true", help="Inspect input without creating conversion output"
     )
     input_output.add_argument(
@@ -316,7 +322,9 @@ def main() -> None:
         if input_is_directory:
             if args.workers < 1:
                 raise ValueError("workers must be at least one")
-            batch = convert_batch((args.epub_path,), options, options.output_path, args.workers)
+            batch = convert_batch(
+                (args.epub_path,), options, options.output_path, args.workers, args.worker_backend
+            )
             payload: dict[str, object] = {
                 "succeeded": batch.succeeded,
                 "failed": batch.failed,
