@@ -48,6 +48,10 @@ class RichProgressObserver(ConversionObserver):
         if self._progress and self._task_id is not None:
             self._progress.advance(self._task_id)
 
+    def phase_complete(self) -> None:
+        """Close the current phase display cleanly."""
+        self._close_progress()
+
     def close(self) -> None:
         """Close the progress display cleanly."""
         self._close_progress()

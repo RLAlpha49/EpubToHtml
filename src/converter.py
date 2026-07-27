@@ -23,7 +23,13 @@ from html_transform import (
     rewrite_css_urls,
     wrap_document,
 )
-from images import EmbeddedImageOutput, ExtractedImageOutput, ImageIndex, ImageOutput
+from images import (
+    EmbeddedImageOutput,
+    ExtractedImageOutput,
+    ImageIndex,
+    ImageOutput,
+    normalize_epub_path,
+)
 from model import (
     ArchiveLimitError,
     ConversionCancelledError,
@@ -240,21 +246,31 @@ def _process_images(
     started_at: float,
     diagnostics: WarningCollector,
     observer: ConversionObserver | None,
-) -> tuple[int, int]:
-    """Register images and extractable resources, returning (processed, skipped)."""
+) -> tuple[int, int, int]:
+    """Register images and extractable resources, returning (processed, skipped, estimated_bytes).
+
+    ``estimated_bytes`` is the sum of base64-encoded data URL sizes for
+    embedded images; callers should fail fast when the estimate exceeds the
+    configured output limit.  For extract mode the value is always 0.
+    """
     strategy: ImageOutput
     if staged.images_path:
         strategy = ExtractedImageOutput(staged.images_path, options.safe_html)
     else:
         strategy = EmbeddedImageOutput(options.safe_html, options.stable_mime_types)
-    processed_images = skipped = 0
+    processed_images = skipped = estimated_bytes = 0
     if observer:
         observer.phase("Processing images", len(images), "img")
     for image in images:
         _check_cancelled(options, started_at)
         try:
-            index.add(strategy.register(image))
+            ref = strategy.register(image)
+            index.add(ref)
             processed_images += 1
+            # Accumulate embedded data URL length so callers can fail fast
+            # before spending CPU on document processing.
+            if isinstance(strategy, EmbeddedImageOutput):
+                estimated_bytes += len(ref.url)
         except (OSError, ValueError) as error:
             skipped += 1
             diagnostics.add("skipped-image", str(error), image.get_name())
@@ -280,7 +296,9 @@ def _process_images(
                 diagnostics.add(
                     "omitted-resource", "Resource omitted by policy.", resource.get_name()
                 )
-    return processed_images, skipped
+    if observer:
+        observer.phase_complete()
+    return processed_images, skipped, estimated_bytes
 
 
 def _process_stylesheets(
@@ -329,6 +347,8 @@ def _decode_documents(
             diagnostics.add("skipped-document", str(error), document.get_name())
         if observer:
             observer.advance()
+    if observer:
+        observer.phase_complete()
     return decoded, skipped_documents
 
 
@@ -340,8 +360,10 @@ def _prepare_sections(
     started_at: float,
     diagnostics: WarningCollector,
     observer: ConversionObserver | None,
+    chapter_titles: dict[str, str] | None = None,
 ) -> Iterator[str]:
     """Yield prepared HTML sections from decoded documents."""
+    add_back_to_top = options.navigation and chapter_titles is not None
     if observer:
         observer.phase("Extracting content", len(decoded), "doc")
     for document, content in decoded:
@@ -359,6 +381,8 @@ def _prepare_sections(
                 svg_policy=options.svg_policy,
                 mathml_policy=options.mathml_policy,
             ),
+            chapter_titles=chapter_titles,
+            add_back_to_top=add_back_to_top,
         )
         for warning in warnings:
             diagnostics.add(warning.code, warning.message, warning.location)
@@ -373,6 +397,7 @@ def _write_output(
     options: ConversionOptions,
     book: epub.EpubBook,
     internal_css: str,
+    chapter_titles: dict[str, str] | None = None,
 ) -> None:
     """Write sections to staged output according to output options."""
     with staged.open_html("\r\n" if options.newline == "crlf" else "\n") as output:
@@ -407,6 +432,7 @@ def _write_output(
                     book,
                     options.reader_theme,
                     options.navigation_depth,
+                    chapter_titles,
                 )
             )
         elif options.chunked:
@@ -436,19 +462,21 @@ def convert(
     try:
         book = (reader or EbookLibReader()).read(options.input_path, options.deadline_seconds)
         _check_cancelled(options, started_at)
-        items = list(book.get_items())
+        items = book.get_items()
         documents = _selected_documents(_documents(book), options)
-        images = [
-            item for item in items if item.get_type() in (ebooklib.ITEM_IMAGE, ebooklib.ITEM_COVER)
-        ]
-        resources = [
-            item
-            for item in items
-            if str(item.media_type or "").startswith(
+        images: list[epub.EpubItem] = []
+        resources: list[epub.EpubItem] = []
+        stylesheets: list[epub.EpubItem] = []
+        for item in items:
+            item_type = item.get_type()
+            if item_type in (ebooklib.ITEM_IMAGE, ebooklib.ITEM_COVER):
+                images.append(item)
+            elif str(item.media_type or "").lower() == "text/css":
+                stylesheets.append(item)
+            elif str(item.media_type or "").startswith(
                 ("audio/", "video/", "font/", "application/font")
-            )
-        ]
-        stylesheets = [item for item in items if str(item.media_type or "").lower() == "text/css"]
+            ):
+                resources.append(item)
         if len(documents) > options.archive_limits.max_documents:
             raise ArchiveLimitError("EPUB contains more documents than allowed.")
         if len(images) > options.archive_limits.max_images:
@@ -461,20 +489,45 @@ def convert(
 
         with StagedOutput(options.output_path, images_name, options.force) as staged:
             index = ImageIndex()
-            processed_images, skipped = _process_images(
+            processed_images, skipped, estimated_bytes = _process_images(
                 images, resources, options, staged, index, started_at, diagnostics, observer
             )
+            if (
+                options.image_strategy == "embed"
+                and estimated_bytes > options.archive_limits.max_output_bytes
+            ):
+                raise ArchiveLimitError(
+                    "Estimated embedded-image size exceeds configured output limit. "
+                    "Use --strategy extract or increase --max-output-bytes."
+                )
             internal_css = _process_stylesheets(stylesheets, options, index, diagnostics)
             decoded, skipped_documents = _decode_documents(
                 documents, options, started_at, diagnostics, observer
             )
             targets = build_targets(decoded)
+            chapter_titles: dict[str, str] = {}
             sections = _prepare_sections(
-                decoded, targets, index, options, started_at, diagnostics, observer
+                decoded,
+                targets,
+                index,
+                options,
+                started_at,
+                diagnostics,
+                observer,
+                chapter_titles,
             )
             if observer:
                 observer.phase("Writing output")
-            _write_output(sections, staged, options, book, internal_css)
+            _write_output(
+                sections,
+                staged,
+                options,
+                book,
+                internal_css,
+                chapter_titles if options.navigation else None,
+            )
+            if observer:
+                observer.phase_complete()
             if staged.size() > options.archive_limits.max_output_bytes:
                 raise ArchiveLimitError("Generated output exceeds configured output limit.")
             if options.validate_output and staged.html_path:
@@ -487,6 +540,19 @@ def convert(
 
         peak_memory_bytes = tracemalloc.get_traced_memory()[1]
         tracemalloc.stop()
+
+        # Build human-readable chapter labels: prefer the collected heading
+        # text and fall back to the filename stem of each document.
+        chapters: tuple[str, ...] = ()
+        if chapter_titles:
+            # Use titles in the order they appear in decoded documents.
+            chapter_order: list[str] = []
+            for item, _ in decoded:
+                path = normalize_epub_path(item.get_name())
+                target = targets[path]
+                label = chapter_titles.get(target.anchor, Path(item.get_name()).stem)
+                chapter_order.append(label)
+            chapters = tuple(chapter_order)
 
         return ConversionResult(
             options.output_path,
@@ -503,7 +569,7 @@ def convert(
             options.input_path.stat().st_size,
             options.output_path.stat().st_size,
             peak_memory_bytes=peak_memory_bytes,
-            chapters=tuple(item.get_name() for item, _ in decoded),
+            chapters=chapters,
         )
     except BaseException:
         tracemalloc.stop()

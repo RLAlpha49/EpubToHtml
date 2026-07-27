@@ -44,6 +44,8 @@ class ConversionObserver(Protocol):
 
     def advance(self) -> None: ...
 
+    def phase_complete(self) -> None: ...
+
 
 class EpubReader(Protocol):
     """Abstract EPUB reader so the converter does not depend on a specific backend.
@@ -277,6 +279,7 @@ class BatchItemResult:
     input_path: Path
     result: ConversionResult | None = None
     error: str | None = None
+    error_type: str | None = None
 
 
 @dataclass(frozen=True)

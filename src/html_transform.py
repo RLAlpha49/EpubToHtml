@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Literal, Protocol
 from urllib.parse import unquote, urlsplit
 
+import chardet
 from bs4 import BeautifulSoup
 from ebooklib import epub
 
@@ -48,13 +49,8 @@ def decode_document(item: epub.EpubItem) -> tuple[str, ConversionWarning | None]
     try:
         return content.decode("utf-8"), None
     except UnicodeDecodeError:
-        try:
-            import chardet
-
-            detected = chardet.detect(content[:65_536])
-            encoding = detected.get("encoding") if detected.get("confidence", 0) >= 0.5 else None
-        except ImportError:
-            encoding = None
+        detected = chardet.detect(content[:65_536])
+        encoding = detected.get("encoding") if detected.get("confidence", 0) >= 0.5 else None
         detected_label = encoding or "unknown"
         encoding = encoding or "latin-1"
         return content.decode(encoding, errors="replace"), ConversionWarning(
@@ -169,7 +165,15 @@ def sanitize(soup: BeautifulSoup) -> int:
         removed += 1
     for tag in soup.find_all(True):
         for attribute in tuple(tag.attrs):
-            name, value = str(attribute).lower(), str(tag.attrs[attribute])
+            name = str(attribute).lower()
+            raw_value = tag.attrs[attribute]
+            # Attribute values may be lists when BeautifulSoup encounters
+            # multi-valued attributes; collapse them safely.
+            value = (
+                " ".join(str(v) for v in raw_value)
+                if isinstance(raw_value, list)
+                else str(raw_value)
+            )
             if (
                 name.startswith("on")
                 or name == "style"
@@ -289,8 +293,15 @@ def prepare_document(
     excluded: frozenset[str] = frozenset(),
     svg_policy: Literal["omit", "extract", "preserve"] = "omit",
     mathml_policy: Literal["omit", "preserve"] = "omit",
+    chapter_titles: dict[str, str] | None = None,
+    add_back_to_top: bool = False,
 ) -> tuple[str, list[ConversionWarning]]:
-    """Apply all document transformations to one already-decoded document."""
+    """Apply all document transformations to one already-decoded document.
+
+    When *chapter_titles* is provided the first heading text of each
+    section is recorded so callers can feed it to ``wrap_document`` for
+    navigation generation without re-parsing the merged HTML.
+    """
     if isinstance(config, bool):
         config = DocumentTransformConfig(
             remove_toc=config,
@@ -339,6 +350,22 @@ def prepare_document(
             )
     body = soup.body
     inner = "".join(str(child) for child in body.contents) if body else str(soup)
+
+    # Collect the first heading text for navigation generation.
+    if chapter_titles is not None:
+        headings = soup.find_all(re.compile(r"^h[1-6]$"))
+        heading = next(iter(headings), None)
+        if heading:
+            chapter_titles[target.anchor] = heading.get_text(" ", strip=True)
+
+    # Inject a back-to-top link so wrap_document() doesn't need to re-parse.
+    if add_back_to_top and soup.find("nav") is None and body is not None:
+        for existing in body.find_all("a", class_="back-to-top"):
+            existing.decompose()
+        back_link = soup.new_tag("a", attrs={"href": "#top", "class": "back-to-top"})
+        back_link.string = "Back to top"
+        body.append(back_link)
+
     return (
         f'<section id="{target.anchor}" data-epub-source="{html.escape(path, quote=True)}">{inner}</section>',
         warnings,
@@ -361,8 +388,14 @@ def wrap_document(
     book: epub.EpubBook | None = None,
     theme: str = "auto",
     navigation_depth: int = 1,
+    chapter_titles: dict[str, str] | None = None,
 ) -> str:
-    """Wrap merged content in an accessible reading shell with opt-in navigation."""
+    """Wrap merged content in an accessible reading shell with opt-in navigation.
+
+    When *chapter_titles* is provided (a mapping of section anchor IDs to
+    heading texts collected during ``prepare_document``), navigation entries
+    are built from it directly, avoiding a third ``BeautifulSoup`` parse.
+    """
     theme_css = {
         "auto": ":root { color-scheme: light dark; --page-bg: Canvas; --page-fg: CanvasText; }",
         "light": ":root { color-scheme: light; --page-bg: #fff; --page-fg: #171717; }",
@@ -413,28 +446,48 @@ a:focus-visible {{ outline: 3px solid currentColor; outline-offset: 3px; }}
                     f'<li><a href="{html.escape(destination, quote=True)}">'
                     f"{html.escape(link.get_text(' ', strip=True))}</a></li>"
                 )
-        for number, section in enumerate(soup.find_all("section", recursive=False), start=1):
-            section_id = section.get("id")
-            if not section_id:
-                continue
-            headings = section.find_all(re.compile(r"^h[1-6]$"))
-            heading = next(
-                (candidate for candidate in headings if int(candidate.name[1]) <= navigation_depth),
-                None,
-            )
-            if not entries:
-                label = heading.get_text(" ", strip=True) if heading else f"Chapter {number}"
-                entries.append(
-                    f'<li><a href="#{html.escape(str(section_id), quote=True)}">'
-                    f"{html.escape(label)}</a></li>"
-                )
-            if section.find("nav") is None:
-                section.append(
-                    BeautifulSoup(
-                        '<a class="back-to-top" href="#top">Back to top</a>', "html.parser"
+
+        # Build TOC entries from pre-collected chapter titles when available,
+        # falling back to a full section scan only when they are not provided.
+        if not entries:
+            if chapter_titles is not None:
+                for section_anchor, label in chapter_titles.items():
+                    entries.append(
+                        f'<li><a href="#{html.escape(section_anchor, quote=True)}">'
+                        f"{html.escape(label)}</a></li>"
                     )
-                )
-        content = str(soup)
+            else:
+                for number, section in enumerate(
+                    soup.find_all("section", recursive=False), start=1
+                ):
+                    section_id = section.get("id")
+                    if not section_id:
+                        continue
+                    headings = section.find_all(re.compile(r"^h[1-6]$"))
+                    heading = next(
+                        (
+                            candidate
+                            for candidate in headings
+                            if int(candidate.name[1]) <= navigation_depth
+                        ),
+                        None,
+                    )
+                    label = heading.get_text(" ", strip=True) if heading else f"Chapter {number}"
+                    entries.append(
+                        f'<li><a href="#{html.escape(str(section_id), quote=True)}">'
+                        f"{html.escape(label)}</a></li>"
+                    )
+                for section in soup.find_all("section", recursive=False):
+                    if section.find("nav") is None:
+                        back = soup.new_tag("a", attrs={"href": "#top", "class": "back-to-top"})
+                        back.string = "Back to top"
+                        section.append(back)
+
+        # Only re-serialize the full document if we haven't already injected
+        # back-to-top links during prepare_document (the chapter_titles path).
+        if chapter_titles is None:
+            content = str(soup)
+
         if entries:
             navigation_markup = (
                 '<nav class="document-navigation" aria-label="Table of contents"><h2>Contents</h2><ol>'
