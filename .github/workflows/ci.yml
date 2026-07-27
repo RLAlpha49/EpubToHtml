@@ -20,9 +20,9 @@ jobs:
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -r requirements.lock
       - run: python -m pip install --no-deps -e ".[dev]"
-      - run: python -m nox -s format
-      - run: python -m nox -s lint
-      - run: python -m nox -s typecheck
+      - run: python -m nox -- format
+      - run: python -m nox -- lint
+      - run: python -m nox -- typecheck
 
   tests:
     runs-on: ubuntu-latest
@@ -40,7 +40,7 @@ jobs:
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -r requirements.lock
       - run: python -m pip install --no-deps -e ".[dev]"
-      - run: python -m nox -s coverage
+      - run: python -m nox -- coverage
       - uses: codecov/codecov-action@v7
         with:
           files: ./coverage.xml
@@ -58,7 +58,7 @@ jobs:
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -r requirements.lock
       - run: python -m pip install --no-deps -e ".[dev]"
-      - run: python -m nox -s build
+      - run: python -m nox -- build
 
   security:
     runs-on: ubuntu-latest
