@@ -82,7 +82,7 @@ def build_epub(
         )
         spine.append('<itemref idref="nav"/>')
 
-    for i, (chapter_title, _) in enumerate(chapters):
+    for i, (_chapter_title, _) in enumerate(chapters):
         item_id = f"chapter_{i + 1}"
         manifest.append(
             f'<item id="{item_id}" href="{item_id}.xhtml" media-type="application/xhtml+xml"/>'
@@ -104,18 +104,18 @@ def build_epub(
         '<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="bookid">\n'
         '  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">\n'
         f'    <dc:identifier id="bookid">urn:uuid:test-{title.replace(" ", "").lower()}</dc:identifier>\n'
-        f'    <dc:title>{title}</dc:title>\n'
-        f'    <dc:creator>{author}</dc:creator>\n'
-        f'    <dc:language>{language}</dc:language>\n'
-        + ("".join(f"    <dc:{key}>{value}</dc:{key}>\n" for key, value in (metadata or {}).items()))
+        f"    <dc:title>{title}</dc:title>\n"
+        f"    <dc:creator>{author}</dc:creator>\n"
+        f"    <dc:language>{language}</dc:language>\n"
+        + (
+            "".join(
+                f"    <dc:{key}>{value}</dc:{key}>\n" for key, value in (metadata or {}).items()
+            )
+        )
         + '    <meta property="dcterms:modified">2024-01-01T00:00:00Z</meta>\n'
         "  </metadata>\n"
-        "  <manifest>\n"
-        + "\n".join(f"    {m}" for m in manifest)
-        + "\n  </manifest>\n"
-        "  <spine>\n"
-        + "\n".join(f"    {s}" for s in spine)
-        + "\n  </spine>\n"
+        "  <manifest>\n" + "\n".join(f"    {m}" for m in manifest) + "\n  </manifest>\n"
+        "  <spine>\n" + "\n".join(f"    {s}" for s in spine) + "\n  </spine>\n"
         "</package>"
     )
 
@@ -140,7 +140,7 @@ def build_epub(
             archive.writestr(f"chapter_{i + 1}.xhtml", _chapter_html(chapter_title, content))
 
         if images:
-            for i, (name, data, _) in enumerate(images):
+            for _i, (name, data, _) in enumerate(images):
                 archive.writestr(f"images/{name}", data)
 
         if css:
