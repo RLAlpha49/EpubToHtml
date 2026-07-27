@@ -55,10 +55,11 @@ def decode_document(item: epub.EpubItem) -> tuple[str, ConversionWarning | None]
             encoding = detected.get("encoding") if detected.get("confidence", 0) >= 0.5 else None
         except ImportError:
             encoding = None
+        detected_label = encoding or "unknown"
         encoding = encoding or "latin-1"
         return content.decode(encoding, errors="replace"), ConversionWarning(
             "decode-fallback",
-            f"Decoded document using {encoding} after UTF-8 failed (sampled up to 65536 bytes).",
+            f"Decoded document using {encoding} after UTF-8 failed (detected: {detected_label}, sampled up to 65536 bytes).",
             item.get_name(),
         )
 
@@ -103,7 +104,9 @@ def remove_marked_content(
             else set()
         )
         epub_types = set(str(tag.get("epub:type", "")).split())
-        markers: set[str] = classes | epub_types
+        role_types = set(str(tag.get("role", "")).split())
+        data_epub_types = set(str(tag.get("data-epub-type", "")).split())
+        markers: set[str] = classes | epub_types | role_types | data_epub_types
         selected = (
             (remove_toc and "toc" in markers)
             or (remove_cover and "cover" in markers)
@@ -127,10 +130,13 @@ def safe_url(tag_name: str, attribute: str, value: str) -> bool:
         return False
     if tag_name == "a" and attribute == "href":
         return parsed.scheme.lower() in {"", "http", "https", "mailto", "tel"}
-    return not parsed.scheme or (
-        parsed.scheme.lower() == "data"
-        and parsed.path.lower().startswith(("image/png", "image/jpeg", "image/gif", "image/webp"))
-    )
+    if parsed.scheme.lower() == "data":
+        # Extract the MIME type from data: URLs (format: data:[<mediatype>][;base64],<data>)
+        # Using ; and , as delimiters ensures we match the exact mediatype, not a prefix.
+        path = parsed.path
+        mime = path.split(";")[0].split(",")[0].lower()
+        return mime in {"image/png", "image/jpeg", "image/gif", "image/webp"}
+    return not parsed.scheme
 
 
 def sanitize(soup: BeautifulSoup) -> int:

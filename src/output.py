@@ -54,6 +54,7 @@ class StagedOutput:
         self.root: Path | None = None
         self.html_path: Path | None = None
         self.images_path: Path | None = None
+        self._committed: bool = False
 
     def __enter__(self) -> StagedOutput:
         self._reject_reparse_points()
@@ -115,7 +116,10 @@ class StagedOutput:
             raise OutputError(f"Could not commit converted output: {error}") from error
         finally:
             shutil.rmtree(backup, ignore_errors=True)
+        self._committed = True
 
     def __exit__(self, *_: object) -> None:
         if self.root:
-            shutil.rmtree(self.root, ignore_errors=True)
+            if not self._committed:
+                shutil.rmtree(self.root, ignore_errors=True)
+            self.root = None
